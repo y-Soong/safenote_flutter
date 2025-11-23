@@ -33,8 +33,10 @@ dependencies:
   webview_flutter: ^4.4.2
   webview_flutter_android: ^4.10.5
   webview_flutter_wkwebview: ^3.10.0
-  permission_handler: ^11.4.0
+#  permission_handler: ^11.4.0
   mobile_scanner: ^6.0.2   # ✅ 네이티브 QR 스캐너
+  flutter_inappwebview: ^6.0.0
+  permission_handler: ^12.0.1
 #  webview_flutter: ^3.16.4
 #  webview_flutter_android: ^3.16.9
 #  webview_flutter_wkwebview: ^3.23.1

@@ -1,18 +1,10 @@
 import 'dart:io' show Platform;
-import 'dart:convert' show json;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:webview_flutter/webview_flutter.dart';
-import 'package:webview_flutter_android/webview_flutter_android.dart';
 
-import 'qr_scan_page.dart'; // ✅ 네이티브 스캐너
-
-const bool USE_LOCAL_ASSET = false;
 const String DEV_URL = "https://172.30.1.4:8082";
-
-const _LOG_CH = 'LOG';
-const _ERR_CH = 'ERR';
 
 class WebApp extends StatefulWidget {
   const WebApp({super.key});
@@ -20,192 +12,263 @@ class WebApp extends StatefulWidget {
   State<WebApp> createState() => _WebAppState();
 }
 
-class _WebAppState extends State<WebApp> {
-  late final WebViewController _ctl;
+class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
+  InAppWebViewController? _ctl;
   int _progress = 0;
   String _status = 'init';
+
+  /// 숨겨진 file input을 스캔해서 파일이 있으면 강제로 `input` 이벤트 발생
+  /// (일부 안드 기기에서 change 이벤트가 누락되는 문제 대응)
+  static const String _scanPickersJS = r"""
+  (function(){
+    try {
+      var nodes = document.querySelectorAll(
+        'input[type="file"][id^="gallery_"], input[type="file"][id^="camera_"]'
+      );
+      nodes.forEach(function(input){
+        try {
+          if (input && input.files && input.files.length > 0) {
+            // 강제로 input 이벤트 디스패치(프레임워크에서 v-model/리스너 트리거)
+            var ev = new Event('input', { bubbles: true });
+            input.dispatchEvent(ev);
+          }
+        } catch(e){}
+      });
+    } catch (e) {}
+  })();
+  """;
 
   @override
   void initState() {
     super.initState();
-    _requestPermissions();
-    _setupWebView();
-  }
-
-  Future<void> _requestPermissions() async {
-    // 카메라/마이크/위치 권한 사전요청 (필요 범위만 선택해도 됨)
-    final statuses = await [
-      Permission.camera,
-      Permission.microphone,
-      Permission.location, // 위치가 필요 없다면 제거
-    ].request();
-
-    final allGranted = statuses.values.every((s) => s.isGranted);
-    if (!allGranted) {
-      // 사용자가 거부한 경우 설정 이동 유도
-      await openAppSettings();
-    }
-  }
-
-  void _setupWebView() {
-    late final PlatformWebViewControllerCreationParams params;
-    if (WebViewPlatform.instance is AndroidWebViewPlatform) {
-      params = AndroidWebViewControllerCreationParams();
-    } else {
-      params = const PlatformWebViewControllerCreationParams();
-    }
-
-    final controller = WebViewController.fromPlatformCreationParams(params)
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..addJavaScriptChannel(_LOG_CH,
-          onMessageReceived: (msg) => debugPrint('console: ${msg.message}'))
-      ..addJavaScriptChannel(_ERR_CH,
-          onMessageReceived: (msg) => debugPrint('console.error: ${msg.message}'))
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onProgress: (p) => setState(() => _progress = p),
-          onPageStarted: (url) => setState(() => _status = 'loading: $url'),
-          onPageFinished: (url) async {
-            setState(() => _status = 'finished: $url');
-            await _injectDebugHooks();
-          },
-          // ✅ 여기서 Web 경로를 가로채 네이티브 스캐너로 전환
-          onNavigationRequest: (req) {
-            final url = req.url;
-            // Vue 라우트가 '#/QrScanner' 로 진입하려 할 때
-            if (url.contains('#/QrScanner')) {
-              _openNativeScanner(); // 네이티브 QR 스캐너 실행
-              return NavigationDecision.prevent; // 웹뷰 전환 차단
-            }
-            return NavigationDecision.navigate;
-          },
-          onWebResourceError: (err) {
-            setState(() => _status = 'error: ${err.errorCode} ${err.description}');
-            debugPrint('resourceError: code=${err.errorCode} desc=${err.description}');
-          },
-        ),
-      );
-
-    if (controller.platform is AndroidWebViewController) {
-      final androidController = controller.platform as AndroidWebViewController;
-      AndroidWebViewController.enableDebugging(true);
-      androidController.setMediaPlaybackRequiresUserGesture(false);
-
-      // (옵션) 파일 선택/캡쳐 요청 대응
-      androidController.setOnShowFileSelector((params) async {
-        debugPrint('📷 WebView file/capture request (ignored).');
-        return <String>[];
-      });
-    }
-
-    _ctl = controller;
-    _load();
-  }
-
-  Future<void> _load() async {
-    if (USE_LOCAL_ASSET) {
-      // 자산 확인 (필수는 아님)
-      final manifest = await rootBundle.loadString('AssetManifest.json');
-      final assets = json.decode(manifest) as Map<String, dynamic>;
-      for (final path in const [
-        'assets/vue_app/index.html',
-        'assets/vue_app/js/chunk-vendors.0250f8dc.js',
-        'assets/vue_app/js/app.a8aec3b6.js',
-        'assets/vue_app/css/app.704180ee.css',
-      ]) {
-        debugPrint('[ASSET ${assets.keys.contains(path) ? "OK" : "MISS"}] $path');
-      }
-
-      await rootBundle.loadString('assets/vue_app/index.html');
-      await _ctl.loadFlutterAsset('assets/vue_app/index.html');
-    } else {
-      await _ctl.loadRequest(Uri.parse(DEV_URL));
-    }
-  }
-
-  // ✅ 네이티브 스캐너 열고 결과를 웹뷰로 전달
-  Future<void> _openNativeScanner() async {
-    final result = await Navigator.of(context).push<String?>(
-      MaterialPageRoute(builder: (_) => const QrScanPage()),
-    );
-
-    if (result == null || result.isEmpty) return;
-
-    // 1) 웹뷰 라우터로 결과 페이지로 이동 (Vue: #/QrResultView?qr=...)
-    final escaped = Uri.encodeComponent(result);
-    await _ctl.runJavaScript("""
-      try {
-        // Vue Router 사용 가정
-        window.location.hash = '#/QrResultView?qr=$escaped';
-      } catch (e) {
-        console.error('route change error:', e);
-      }
-    """);
-
-    // 2) 혹은 커스텀 이벤트로 결과 전달 (원하는 방식 택1)
-    // await _ctl.runJavaScript("""
-    //   window.dispatchEvent(new CustomEvent('qr-scanned', { detail: '$escaped' }));
-    // """);
-  }
-
-  Future<void> _injectDebugHooks() async {
-    const js = r'''
-      (function() {
-        window.addEventListener('error', function(e) {
-          try {
-            var t = e.target || {};
-            var src = t.src || t.href || (t.tagName ? t.tagName : '');
-            LOG.postMessage('resource error: ' + src);
-          } catch (_) {}
-        }, true);
-
-        window.onerror = function(msg, url, line, col, err) {
-          ERR.postMessage('onerror: ' + msg + ' @' + url + ':' + line + ':' + col);
-        };
-
-        var origLog = console.log, origErr = console.error, origWarn = console.warn;
-        console.log = function(){ try { LOG.postMessage([].map.call(arguments, String).join(' ')); } catch(_){}; origLog.apply(console, arguments); };
-        console.error = function(){ try { ERR.postMessage([].map.call(arguments, String).join(' ')); } catch(_){}; origErr.apply(console, arguments); };
-        console.warn = function(){ try { LOG.postMessage('warn: ' + [].map.call(arguments, String).join(' ')); } catch(_){}; origWarn.apply(console, arguments); };
-
-        try {
-          LOG.postMessage('baseURI=' + document.baseURI);
-        } catch(_) {}
-      })();
-    ''';
-    await _ctl.runJavaScript(js);
+    WidgetsBinding.instance.addObserver(this);
+    _ensureRuntimePermissions();
   }
 
   @override
-  Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async {
-        if (await _ctl.canGoBack()) {
-          _ctl.goBack();
-          return false;
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// 앱 라이프사이클: 카메라 앱 다녀온 후(RESUMED) 강제 스캔
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _ctl != null) {
+      debugPrint('🔎 App RESUMED -> scan hidden file inputs');
+      _ctl!.evaluateJavascript(source: _scanPickersJS);
+    }
+  }
+
+  Future<void> _ensureRuntimePermissions() async {
+    if (Platform.isAndroid) {
+      final results = await [
+        Permission.camera,
+        Permission.photos,   // Android 13+: READ_MEDIA_IMAGES
+        Permission.storage,  // Android 12 이하 호환
+        Permission.microphone,
+      ].request();
+      debugPrint('Permissions: $results');
+    }
+  }
+
+  InAppWebViewSettings _settings() => InAppWebViewSettings(
+    javaScriptEnabled: true,
+    mediaPlaybackRequiresUserGesture: false,
+    useOnDownloadStart: true,
+    useShouldOverrideUrlLoading: true,
+    javaScriptCanOpenWindowsAutomatically: true,
+    mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+    builtInZoomControls: false,
+    supportZoom: false,
+    allowsInlineMediaPlayback: true,
+
+    // 디버깅: chrome://inspect
+    isInspectable: true,
+
+    // 파일 접근
+    allowFileAccessFromFileURLs: true,
+    allowUniversalAccessFromFileURLs: true,
+    allowFileAccess: true,
+
+    // WebRTC/iframe 힌트
+    iframeAllow: "camera; microphone",
+    iframeAllowFullscreen: true,
+  );
+
+  Future<void> _openDevServer(InAppWebViewController ctl) async {
+    await ctl.loadUrl(urlRequest: URLRequest(url: WebUri(DEV_URL)));
+    debugPrint('🌐 Load DEV_URL -> $DEV_URL');
+  }
+
+  /// JS 콘솔 브릿지: 웹의 console.*을 Flutter 로그로 복제
+  final String _consoleBridgeJS = r"""
+  (function() {
+    try {
+      if (window.__console_bridge_patched__) return;
+      window.__console_bridge_patched__ = true;
+
+      function serializeArg(a) {
+        try {
+          if (a === null || a === undefined) return String(a);
+          if (typeof a === 'string') return a;
+          if (typeof File !== 'undefined' && a instanceof File) {
+            return `[File name=${a.name}, type=${a.type}, size=${a.size}]`;
+          }
+          if (typeof Blob !== 'undefined' && a instanceof Blob) {
+            return `[Blob type=${a.type}, size=${a.size}]`;
+          }
+          if (a instanceof Error) return `[Error ${a.message}]`;
+          return JSON.stringify(a);
+        } catch (e) {
+          try { return String(a); } catch(_) { return '[Unserializable]'; }
         }
-        return true;
-      },
-      child: Scaffold(
-        body: SafeArea(
-          child: Stack(
-            children: [
-              WebViewWidget(controller: _ctl),
-              if (_progress < 100)
-                const Positioned(
-                  top: 0, left: 0, right: 0,
-                  child: LinearProgressIndicator(),
-                ),
-              Positioned(
-                bottom: 8, left: 8, right: 8,
-                child: Text(
-                  _status,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 12),
-                ),
+      }
+
+      var levels = ['log','info','warn','error','debug'];
+      levels.forEach(function(lvl){
+        var orig = console[lvl] ? console[lvl].bind(console) : function(){};
+        console[lvl] = function() {
+          try {
+            var args = Array.prototype.slice.call(arguments).map(serializeArg);
+            if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+              window.flutter_inappwebview.callHandler('JS_CONSOLE', { level: lvl, args: args });
+            }
+          } catch (e) {}
+          try { orig.apply(null, arguments); } catch (e) {}
+        };
+      });
+    } catch (e) {}
+  })();
+  """;
+
+  @override
+  Widget build(BuildContext context) {
+    SystemChrome.setSystemUIOverlayStyle(
+      SystemUiOverlayStyle.dark.copyWith(statusBarColor: Colors.transparent),
+    );
+
+    return Scaffold(
+      body: SafeArea(
+        child: Stack(
+          children: [
+            InAppWebView(
+              initialSettings: _settings(),
+
+              onWebViewCreated: (controller) async {
+                _ctl = controller;
+                debugPrint('WebView created');
+
+                // JS → Flutter 로그 브릿지 핸들러
+                _ctl?.addJavaScriptHandler(
+                  handlerName: 'JS_CONSOLE',
+                  callback: (args) {
+                    try {
+                      final payload = (args.isNotEmpty ? args[0] : null) as Map?;
+                      final level = payload?['level'] ?? 'log';
+                      final lst = (payload?['args'] ?? []) as List?;
+                      final msg = (lst ?? []).join(' ');
+                      debugPrint('[JS][$level] $msg');
+                    } catch (e) {
+                      debugPrint('[JS][bridge] parse error: $e');
+                    }
+                    return null;
+                  },
+                );
+
+                await _openDevServer(controller);
+              },
+
+              onLoadStart: (controller, url) async {
+                setState(() => _status = 'pageStarted: $url');
+                debugPrint('onLoadStart: $url');
+              },
+
+              onLoadStop: (controller, url) async {
+                setState(() => _status = 'pageFinished: $url');
+                debugPrint('onLoadStop: $url');
+
+                // 콘솔 브릿지 주입
+                try {
+                  await controller.evaluateJavascript(source: _consoleBridgeJS);
+                  debugPrint('✅ console bridge injected');
+                } catch (e) {
+                  debugPrint('❌ console bridge inject failed: $e');
+                }
+
+                // 로드 완료 직후 한 번 스캔 (change 누락 기기 대응)
+                try {
+                  await controller.evaluateJavascript(source: _scanPickersJS);
+                  debugPrint('🔎 post-finish scan executed');
+                } catch (_) {}
+
+                try {
+                  final current = await controller.getUrl();
+                  debugPrint('currentUrl(after finished) = $current');
+                } catch (_) {}
+              },
+
+              onProgressChanged: (controller, progress) {
+                setState(() => _progress = progress);
+              },
+
+              shouldOverrideUrlLoading: (controller, navAction) async {
+                final url = navAction.request.url;
+                debugPrint('shouldOverrideUrlLoading -> $url');
+                return NavigationActionPolicy.ALLOW;
+              },
+
+              onPermissionRequest: (controller, request) async {
+                debugPrint('onPermissionRequest: ${request.resources}');
+                return PermissionResponse(
+                  resources: request.resources,
+                  action: PermissionResponseAction.GRANT,
+                );
+              },
+
+              // (안드) 파일 선택기 진입 로깅 — 문제 발생 시 추적에 도움
+              // androidOnShowFileChooser: (controller, params) async {
+              //   debugPrint(
+              //       'androidOnShowFileChooser: accept=${params.acceptTypes} '
+              //           'capture=${params.isCaptureEnabled} '
+              //           'mode=${params.mode} '
+              //           'filenameHint=${params.filenameHint}');
+              //   // 기본 시스템 파일선택기 사용
+              //   return null;
+              // },
+
+              onReceivedServerTrustAuthRequest: (controller, challenge) async {
+                debugPrint('onReceivedServerTrustAuthRequest: ${challenge.protectionSpace.host}');
+                return ServerTrustAuthResponse(
+                  action: ServerTrustAuthResponseAction.PROCEED,
+                );
+              },
+
+              onConsoleMessage: (controller, msg) {
+                debugPrint('console[${msg.messageLevel}] ${msg.message}');
+              },
+
+              onReceivedError: (controller, request, error) {
+                debugPrint('onReceivedError: ${error.type} ${error.description} for ${request.url}');
+                setState(() => _status = 'error: ${error.type} ${error.description}');
+              },
+            ),
+
+            if (_progress < 100)
+              const Positioned(
+                top: 0, left: 0, right: 0,
+                child: LinearProgressIndicator(),
               ),
-            ],
-          ),
+
+            Positioned(
+              bottom: 8, left: 8, right: 8,
+              child: Text(
+                _status,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+          ],
         ),
       ),
     );
