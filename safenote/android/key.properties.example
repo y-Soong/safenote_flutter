@@ -1,0 +1,10 @@
+# 실제 keystore 생성 후 본 파일을 key.properties 로 복사·작성한다. 절대 커밋 금지.
+# 생성 명령(safenote/android 에서 실행):
+#   keytool -genkey -v -keystore safenote-upload-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias safenote
+#
+# storeFile 경로는 본 파일(android/key.properties) 위치 기준 상대경로다.
+# 절대경로(예: C:/PRAFTA/.../safenote-upload-key.jks)도 가능.
+storePassword=<keystore 비밀번호>
+keyPassword=<key 비밀번호>
+keyAlias=safenote
+storeFile=safenote-upload-key.jks

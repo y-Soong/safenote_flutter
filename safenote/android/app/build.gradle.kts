@@ -1,11 +1,22 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// release signing 설정: android/key.properties 가 존재할 때만 활성.
+// 부재 시 debug 키로 fallback (배포용 아님, 개발 편의)
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+}
+
 android {
-    namespace = "com.example.safenote"
+    namespace = "com.prafta.safenote"
     compileSdk = 36 // ✅ mobile_scanner, webview_flutter_android 요구사항 충족
     ndkVersion = flutter.ndkVersion
 
@@ -20,11 +31,24 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.safenote"
+        applicationId = "com.prafta.safenote"
         minSdk = flutter.minSdkVersion
         targetSdk = 36 // ✅ compileSdk와 동일하게 유지
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+    }
+
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                // storeFile 은 key.properties 가 있는 위치(=android/) 기준 상대경로로 해석한다.
+                // 기본 file(...) 은 app 모듈(=android/app/) 기준이라 한 레벨 어긋나는 점을 보정.
+                storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
     }
 
     buildTypes {
@@ -35,7 +59,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug") // ⚠️ 실제 배포 시 release 키로 변경
+            // key.properties 가 있으면 release 키로 서명, 없으면 debug 키 fallback (배포용 아님)
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
         }
 
         debug {

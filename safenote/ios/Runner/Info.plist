@@ -24,6 +24,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>NSCameraUsageDescription</key>
     <string>QR 코드 인식을 위해 카메라 접근이 필요합니다.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+    <string>출퇴근/TBM 위치 확인을 위해 현재 위치 접근이 필요합니다.</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

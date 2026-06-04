@@ -37,6 +37,10 @@ dependencies:
   mobile_scanner: ^6.0.2   # ✅ 네이티브 QR 스캐너
   flutter_inappwebview: ^6.0.0
   permission_handler: ^12.0.1
+  geolocator: ^13.0.1      # ✅ 현재 위치 취득(Position.isMocked 지원) — GET_GPS 브리지/위치 하드 게이트
+  device_info_plus: ^10.1.2   # prafta-com-003: 모델/OS/IDFV(iOS) + Android ID 취득 — GET_DEVICE_INFO 브리지
+  package_info_plus: ^8.0.2   # prafta-com-003: 앱 버전 취득 — GET_DEVICE_INFO 브리지
+  android_id: ^0.4.0          # prafta-com-003: Android ANDROID_ID(Settings.Secure) 취득 — GET_DEVICE_INFO 브리지
 #  webview_flutter: ^3.16.4
 #  webview_flutter_android: ^3.16.9
 #  webview_flutter_wkwebview: ^3.23.1
@@ -54,6 +58,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.13.1
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -66,10 +71,13 @@ flutter:
   # the material Icons class.
   uses-material-design: true
   assets:
-    - assets/vue_app/           # index.html 포함
-    - assets/vue_app/js/
-    - assets/vue_app/css/
-    - assets/vue_app/img/       # 있으면 추가
+    # Flutter assets: 한 줄에 디렉토리만 적으면 해당 디렉토리 직속 파일만 포함된다.
+    # 중첩 폴더(예: dist/assets/) 까지 rootBundle 에 등록하려면 각 하위 폴더를 명시한다.
+    # InAppLocalhostServer (lib/web_app.dart release 모드) 가 rootBundle.load() 로 개별 파일을
+    # 요청하므로 Vite 산출물의 모든 하위 폴더를 enumerate 한다.
+    - assets/vue_app/
+    - assets/vue_app/assets/
+    - assets/icons/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
@@ -101,3 +109,11 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icons/app_icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icons/app_icon_foreground.png"

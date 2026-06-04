@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- debug 빌드 전용 (sourceSet main = debug 빌드만 사용). release 빌드는 src/release/res/xml/ 의 동명 파일을 사용. -->
 <network-security-config>
     <!-- 개발 단계: 사용자(단말) 인증서도 신뢰 -->
     <base-config cleartextTrafficPermitted="true">

@@ -43,3 +43,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Android signing — 절대 커밋 금지
+android/key.properties
+android/*.jks
+android/*.keystore
+android/app/*.jks
+android/app/*.keystore

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- release 빌드 기본: cleartext 차단, 시스템 인증서만 신뢰 -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+
+    <!-- 개발/테스트용 평문(http) 허용 화이트리스트.
+         localhost/127.0.0.1: 앱 내장 번들 서버(InAppLocalhostServer, http://localhost:8080).
+         172.30.1.71: 사내 PC 백엔드(http). 운영 HTTPS 도메인 전환 시 본 domain-config 제거. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">172.30.1.71</domain>
+        <!-- 카카오 지도 SDK: 페이지가 http(localhost)로 떠서 엔진/타일을 http로 받음 -->
+        <domain includeSubdomains="true">daumcdn.net</domain>
+        <domain includeSubdomains="true">kakao.com</domain>
+        <trust-anchors>
+            <certificates src="system"/>
+            <certificates src="user"/>
+        </trust-anchors>
+    </domain-config>
+</network-security-config>
