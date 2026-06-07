@@ -39,6 +39,15 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
 
   DateTime? _lastBackPressedAt; // ✅ 추가
 
+  // prafta-051-09: 앱 포그라운드 누적초(단조 증가, TBM 세션 무관 전역 누적).
+  // - _fgAccumSec: 지금까지 누적된 포그라운드 시간(초).
+  // - _fgResumedAt: 현재 포그라운드 진입 시각(떠 있는 동안만 non-null).
+  // GET_APP_FOREGROUND_SEC 브리지가 (_fgAccumSec + 진행중 경과초)를 반환한다.
+  // 누적/합산/반환만 담당하며, 세션 귀속·NULL 처리·저장은 Vue/백엔드 몫(비즈니스 로직 금지).
+  // 한계: 시스템 강제종료(detached 미수신) 시 마지막 진행분이 유실될 수 있다.
+  int _fgAccumSec = 0;
+  DateTime? _fgResumedAt;
+
   /// 숨겨진 file input을 스캔해서 파일이 있으면 강제로 `input` 이벤트 발생
   /// (일부 안드 기기에서 change 이벤트가 누락되는 문제 대응)
   static const String _scanPickersJS = r"""
@@ -130,13 +139,48 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  /// 앱 라이프사이클: 카메라 앱 다녀온 후(RESUMED) 강제 스캔
+  /// 앱 라이프사이클:
+  /// - RESUMED: 카메라 앱 다녀온 후 강제 스캔 + 포그라운드 진입 시각 기록(prafta-051-09).
+  /// - PAUSED/INACTIVE/DETACHED: 포그라운드 경과초를 누적(prafta-051-09).
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _ctl != null) {
-      debugPrint('🔎 App RESUMED -> scan hidden file inputs');
-      _ctl!.evaluateJavascript(source: _scanPickersJS);
+    if (state == AppLifecycleState.resumed) {
+      // prafta-051-09: 포그라운드 진입 시각 기록(누적은 백그라운드 전환 시 확정).
+      _fgResumedAt = DateTime.now();
+
+      // 기존 동작 보존: 카메라/갤러리 다녀온 뒤 숨은 file input 강제 스캔.
+      if (_ctl != null) {
+        debugPrint('🔎 App RESUMED -> scan hidden file inputs');
+        _ctl!.evaluateJavascript(source: _scanPickersJS);
+      }
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      // prafta-051-09: 포그라운드 → 백그라운드 전환. 진행분을 누적에 확정.
+      _accumulateForeground();
     }
+  }
+
+  /// prafta-051-09: 진행 중인 포그라운드 경과초를 _fgAccumSec 에 누적하고 진행 상태를 종료한다.
+  void _accumulateForeground() {
+    final startedAt = _fgResumedAt;
+    if (startedAt != null) {
+      final elapsedSec = DateTime.now().difference(startedAt).inSeconds;
+      if (elapsedSec > 0) {
+        _fgAccumSec += elapsedSec;
+      }
+      _fgResumedAt = null;
+    }
+  }
+
+  /// prafta-051-09: 현재까지의 포그라운드 누적초(떠 있으면 진행분 합산).
+  int _currentForegroundSec() {
+    final startedAt = _fgResumedAt;
+    if (startedAt != null) {
+      final elapsedSec = DateTime.now().difference(startedAt).inSeconds;
+      return _fgAccumSec + (elapsedSec > 0 ? elapsedSec : 0);
+    }
+    return _fgAccumSec;
   }
 
   Future<void> _ensureRuntimePermissions() async {
@@ -447,6 +491,19 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                     handlerName: 'GET_DEVICE_INFO',
                     callback: (args) async {
                       return await _handleGetDeviceInfo();
+                    },
+                  );
+
+                  // GET_APP_FOREGROUND_SEC 브리지 (prafta-051-09): 앱 포그라운드 누적초 pull.
+                  // 응답 계약: {status:'OK', foregroundSec:int}
+                  // 누적/합산/반환만 담당(비즈니스 로직 금지). 귀속·NULL·저장은 Vue/백엔드 몫.
+                  _ctl?.addJavaScriptHandler(
+                    handlerName: 'GET_APP_FOREGROUND_SEC',
+                    callback: (args) {
+                      return {
+                        'status': 'OK',
+                        'foregroundSec': _currentForegroundSec(),
+                      };
                     },
                   );
 
