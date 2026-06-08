@@ -10,6 +10,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:android_id/android_id.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // 개발 빌드는 LAN dev 서버, 운영 빌드는 InAppLocalhostServer 의 bundled assets 를 로딩한다.
 // 둘 다 --dart-define 으로 외부에서 덮어쓸 수 있다.
@@ -359,6 +360,25 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     iframeAllowFullscreen: true,
   );
 
+  /// 첨부 다운로드 스트림 URL 판별(경로가 '/file-download' 로 끝남). 토큰 발급 EP
+  /// ('/file-download-token')는 axios(JSON)로 처리되어 네비게이션이 아니므로 제외된다.
+  bool _isDownloadUrl(WebUri? url) {
+    if (url == null) return false;
+    return url.path.endsWith('/file-download');
+  }
+
+  /// 다운로드 URL 을 외부 브라우저로 연다(파일 저장은 OS 다운로드 매니저가 처리).
+  Future<void> _launchExternal(WebUri? url) async {
+    if (url == null) return;
+    try {
+      final uri = Uri.parse(url.toString());
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok) debugPrint('첨부 외부 열기 실패: $uri');
+    } catch (e) {
+      debugPrint('첨부 외부 열기 예외: $e');
+    }
+  }
+
   /// 운영 백엔드 절대 URL(_kAppBaseUrl)을 페이지의 JS 번들이 실행되기 "전"(document-start)에
   /// window.__APP_BASE_URL__ 로 주입한다. Vue 의 axios 인스턴스는 모듈 로드 시점에
   /// baseURL 을 고정하므로, onLoadStop(페이지 로드 후) 주입은 이미 늦다.
@@ -557,7 +577,21 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                 shouldOverrideUrlLoading: (controller, navAction) async {
                   final url = navAction.request.url;
                   debugPrint('shouldOverrideUrlLoading -> $url');
+                  // 첨부 다운로드(/file-download)는 웹뷰가 octet-stream 을 직접 렌더하지 못하고
+                  // 연결만 끊겨 백엔드 스트리밍 오류(broken pipe)가 난다. 외부 브라우저로 위임하고
+                  // 웹뷰 자체 로드는 취소해 서버 요청 자체를 만들지 않는다.
+                  if (_isDownloadUrl(url)) {
+                    await _launchExternal(url);
+                    return NavigationActionPolicy.CANCEL;
+                  }
                   return NavigationActionPolicy.ALLOW;
+                },
+
+                // useOnDownloadStart 안전망: shouldOverrideUrlLoading 으로 못 잡은
+                // 다운로드(window.open/새 창 경유 등)도 외부 브라우저로 위임한다.
+                onDownloadStartRequest: (controller, downloadRequest) async {
+                  debugPrint('onDownloadStartRequest -> ${downloadRequest.url}');
+                  await _launchExternal(downloadRequest.url);
                 },
 
                 onPermissionRequest: (controller, request) async {

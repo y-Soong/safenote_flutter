@@ -79,6 +79,18 @@ flutter {
     source = "../.."
 }
 
+// prafta-app-023: url_launcher(첨부 외부열기)가 끌어온 androidx.core 1.17.0 / browser 1.9.0 은
+// AGP 8.9.1+ 를 요구해 현재 AGP 8.6.0 빌드(checkReleaseAarMetadata)를 깬다.
+// AGP 8.6.0 호환 버전(core 1.16.0 / browser 1.8.0)으로 고정한다.
+// (url_launcher 는 단순 ACTION_VIEW 인텐트 실행이라 구버전 androidx 로도 정상 동작)
+configurations.all {
+    resolutionStrategy {
+        force("androidx.core:core:1.16.0")
+        force("androidx.core:core-ktx:1.16.0")
+        force("androidx.browser:browser:1.8.0")
+    }
+}
+
 dependencies {
     // ✅ Java11 호환
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
