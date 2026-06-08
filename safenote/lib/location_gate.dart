@@ -57,10 +57,33 @@ class _LocationGateState extends State<LocationGate> with WidgetsBindingObserver
   /// 앱 설정 화면(영구거부 시) 다녀온 뒤 복귀하면 권한을 재평가한다.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed &&
-        _status != _GateStatus.granted &&
-        !_busy) {
+    if (state != AppLifecycleState.resumed || _status == _GateStatus.granted) {
+      return;
+    }
+    if (_busy) {
+      // 진행 중인 요청(requestPermission)이 OS 권한콜백 유실로 영구 고착됐을 수 있다.
+      // 이때 _busy 가 true 로 남아 일반 재평가가 막히므로, 다이얼로그를 띄우지 않는
+      // 읽기 전용 재확인으로 "이미 허용됨" 을 감지해 고착을 푼다(자가복구).
+      _rescueOnResume();
+    } else {
       _evaluateAndRequest(requestIfDenied: false);
+    }
+  }
+
+  /// resume 시 읽기 전용 권한 재확인. 이미 허용 상태면 고착(_busy)을 풀고 진입한다.
+  /// 미허용이면 진행 중인 요청을 방해하지 않도록 상태를 강제로 바꾸지 않는다.
+  Future<void> _rescueOnResume() async {
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return;
+      final permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.always ||
+          permission == LocationPermission.whileInUse) {
+        _busy = false; // 고착 해제
+        _setStatus(_GateStatus.granted);
+      }
+    } catch (e) {
+      debugPrint('[LocationGate] resume 재확인 실패: $e');
     }
   }
 
