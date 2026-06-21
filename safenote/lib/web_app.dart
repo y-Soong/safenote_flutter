@@ -1,10 +1,11 @@
-import 'dart:async' show TimeoutException;
+import 'dart:async' show StreamSubscription, TimeoutException;
 import 'dart:collection' show UnmodifiableListView;
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -48,6 +49,13 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   // 한계: 시스템 강제종료(detached 미수신) 시 마지막 진행분이 유실될 수 있다.
   int _fgAccumSec = 0;
   DateTime? _fgResumedAt;
+
+  // prafta-com-008-F02: FCM 토큰 refresh 구독(앱 1회 구독, dispose 시 해제).
+  // onTokenRefresh 발화 시 window.__onPushTokenRefresh 콜백으로 Vue 에 push 한다.
+  // ★주의: 알림 권한 요청을 라이프사이클 콜백(onResume 등)에 박지 않는다.
+  //   (메모리 project_prafta_app_perm_native_race — geolocator 와 Activity 단위 충돌로
+  //    첫 설치 무한로딩 사고). 권한 요청은 Vue 가 GET_PUSH_TOKEN 을 호출하는 단일 경로에서만 한다.
+  StreamSubscription<String>? _tokenRefreshSub;
 
   /// 숨겨진 file input을 스캔해서 파일이 있으면 강제로 `input` 이벤트 발생
   /// (일부 안드 기기에서 change 이벤트가 누락되는 문제 대응)
@@ -137,6 +145,7 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _localhost?.close();
+    _tokenRefreshSub?.cancel(); // prafta-com-008-F02: FCM refresh 구독 해제
     super.dispose();
   }
 
@@ -336,6 +345,77 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     }
   }
 
+  /// GET_PUSH_TOKEN 브리지 핸들러 (prafta-com-008-F02).
+  ///
+  /// Vue 가 등록 직전(pull)에 호출한다. 알림 권한 상태를 확인/요청한 뒤 FCM 토큰을 취득해
+  /// 계약대로 Map 을 반환한다. 토큰을 백엔드로 직접 보내지 않는다(비즈니스 로직 금지 — F-1 = Vue 경유).
+  ///
+  /// ★권한 요청 위치: 이 핸들러(= Vue 가 명시적으로 호출하는 단일 경로)에서만 requestPermission 을
+  ///   호출한다. onResume 등 라이프사이클 콜백에 절대 박지 않는다
+  ///   (메모리 project_prafta_app_perm_native_race — geolocator 와 Activity 단위 충돌 사고).
+  ///
+  /// 반환 계약:
+  ///   { pushToken: String?, platform: 'android', permission: 'granted'|'denied' }
+  ///   - 권한 거부 → permission='denied', pushToken=null
+  ///   - 권한 허용이나 토큰 미발급/취득 실패 → permission='granted', pushToken=null
+  Future<Map<String, dynamic>> _handleGetPushToken() async {
+    const String platform = 'android';
+    try {
+      final messaging = FirebaseMessaging.instance;
+
+      // 1) 알림 권한 확인/요청(단일 경로). iOS/Android13+ 모두 이 한 번의 요청으로 처리.
+      final settings = await messaging.requestPermission();
+      final bool granted =
+          settings.authorizationStatus == AuthorizationStatus.authorized ||
+          settings.authorizationStatus == AuthorizationStatus.provisional;
+
+      if (!granted) {
+        debugPrint('[GET_PUSH_TOKEN] 알림 권한 거부: ${settings.authorizationStatus}');
+        return {'pushToken': null, 'platform': platform, 'permission': 'denied'};
+      }
+
+      // 2) FCM 토큰 취득(권한 허용이어도 환경에 따라 null 가능).
+      String? token;
+      try {
+        token = await messaging.getToken();
+      } catch (e) {
+        debugPrint('[GET_PUSH_TOKEN] getToken 실패: $e');
+      }
+
+      debugPrint('[GET_PUSH_TOKEN] granted=$granted hasToken=${token != null}');
+      return {'pushToken': token, 'platform': platform, 'permission': 'granted'};
+    } catch (e) {
+      // Firebase 미초기화(google-services.json 미배치 등) 포함 모든 실패는 denied 로 graceful 처리.
+      debugPrint('[GET_PUSH_TOKEN] 취득 실패: $e');
+      return {'pushToken': null, 'platform': platform, 'permission': 'denied'};
+    }
+  }
+
+  /// prafta-com-008-F02: FCM 토큰 refresh 를 Vue 로 push 한다.
+  ///
+  /// onTokenRefresh 발화 시 window.__onPushTokenRefresh(token) 콜백을 호출한다(push 모델).
+  /// 토큰 문자열은 jsStringLiteral 로 안전 escape 한다. 등록 API 호출(JWT 가드 포함)은 Vue 몫.
+  /// 구독은 앱 1회만 설정(onWebViewCreated)하고 dispose 에서 해제한다.
+  void _subscribeTokenRefresh() {
+    _tokenRefreshSub?.cancel();
+    _tokenRefreshSub = FirebaseMessaging.instance.onTokenRefresh.listen(
+      (token) {
+        final ctl = _ctl;
+        if (ctl == null) return;
+        final literal = jsStringLiteral(token);
+        debugPrint('[PUSH_TOKEN_REFRESH] refresh 수신 -> Vue push');
+        // ignore: discarded_futures
+        ctl.evaluateJavascript(
+          source:
+              "window.__onPushTokenRefresh && window.__onPushTokenRefresh($literal)",
+        );
+      },
+      onError: (e) {
+        debugPrint('[PUSH_TOKEN_REFRESH] 구독 오류: $e');
+      },
+    );
+  }
+
   InAppWebViewSettings _settings() => InAppWebViewSettings(
     javaScriptEnabled: true,
     mediaPlaybackRequiresUserGesture: false,
@@ -443,6 +523,7 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
           } catch (e) {}
           try { orig.apply(null, arguments); } catch (e) {}
         };
+        
       });
     } catch (e) {}
   })();
@@ -526,6 +607,20 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                       };
                     },
                   );
+
+                  // GET_PUSH_TOKEN 브리지 (prafta-com-008-F02): FCM 토큰 + 알림권한 pull.
+                  // 응답 계약: {pushToken:String?, platform:'android', permission:'granted'|'denied'}
+                  // 토큰 백엔드 등록은 Vue 몫(비즈니스 로직 금지). 권한 요청은 이 단일 경로에서만.
+                  _ctl?.addJavaScriptHandler(
+                    handlerName: 'GET_PUSH_TOKEN',
+                    callback: (args) async {
+                      return await _handleGetPushToken();
+                    },
+                  );
+
+                  // 토큰 refresh push (prafta-com-008-F02): onTokenRefresh -> window.__onPushTokenRefresh.
+                  // 컨트롤러 확보 후 1회 구독(dispose 에서 해제).
+                  _subscribeTokenRefresh();
 
                   await _openInitialUrl(controller);
                 },

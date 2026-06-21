@@ -10,6 +10,7 @@
       connect-src 백엔드 호스트는 IP 고정 대신 "호스트 무관 + 포트 고정" 와일드카드를 쓴다.
         - http://*:8080  = 백엔드 API (release: window.__APP_BASE_URL__ 로 주입되는 LAN IP:8080)
         - https://*:8082 = Vite dev 서버(npm run dev, HTTPS)
+        - https://*.prafta.com = Cloudflare 터널 경유 외부 접속(api.prafta.com 등)
       DHCP 로 PC LAN IP 가 바뀌어도 CSP 를 다시 빌드할 필요가 없다. (포트로 스코프 → 전면개방 아님)
       ※ 운영 배포용 하드닝 빌드에서는 실제 운영 도메인으로 다시 고정(pin)할 것.
     -->
@@ -19,15 +20,15 @@
         default-src 'self' data: blob:;
         img-src 'self' data: blob: https://*.daumcdn.net http://*.daumcdn.net https://*.kakao.com http://*.kakao.com;
         media-src 'self' data: blob:;
-        connect-src 'self' http://*:8080 https://*:8082 https://dapi.kakao.com http://dapi.kakao.com https://*.daumcdn.net http://*.daumcdn.net https://*.kakao.com http://*.kakao.com ws: wss:;
+        connect-src 'self' http://*:8080 https://*:8082 https://*.prafta.com https://dapi.kakao.com http://dapi.kakao.com https://*.daumcdn.net http://*.daumcdn.net https://*.kakao.com http://*.kakao.com ws: wss:;
         style-src 'self' 'unsafe-inline' https://*.daumcdn.net http://*.daumcdn.net;
         script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https://dapi.kakao.com http://dapi.kakao.com https://*.daumcdn.net http://*.daumcdn.net;
       "
     />
 
     <title>SAFE NOTE</title>
-    <script type="module" crossorigin src="/assets/index-mEF2vSg4.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CA40TKTa.css">
+    <script type="module" crossorigin src="/assets/index-CsTmifzn.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BixHaG3v.css">
   </head>
 
   <body>

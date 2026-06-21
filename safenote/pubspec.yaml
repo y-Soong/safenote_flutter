@@ -42,6 +42,8 @@ dependencies:
   package_info_plus: ^8.0.2   # prafta-com-003: 앱 버전 취득 — GET_DEVICE_INFO 브리지
   android_id: ^0.4.0          # prafta-com-003: Android ANDROID_ID(Settings.Secure) 취득 — GET_DEVICE_INFO 브리지
   url_launcher: ^6.3.0        # prafta-app-023: 첨부 다운로드(/file-download) URL 을 외부 브라우저로 위임
+  firebase_core: ^3.6.0       # prafta-com-008-F02: Firebase 초기화(FCM 전제)
+  firebase_messaging: ^15.1.3 # prafta-com-008-F02: FCM 토큰 획득/refresh — GET_PUSH_TOKEN 브리지
 #  webview_flutter: ^3.16.4
 #  webview_flutter_android: ^3.16.9
 #  webview_flutter_wkwebview: ^3.23.1

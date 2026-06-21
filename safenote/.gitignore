@@ -50,3 +50,8 @@ android/*.jks
 android/*.keystore
 android/app/*.jks
 android/app/*.keystore
+
+# Firebase 시크릿 — 절대 커밋 금지 (prafta-com-008-F)
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
+**/firebase-service-account*.json

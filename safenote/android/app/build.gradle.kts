@@ -5,6 +5,8 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("dev.flutter.flutter-gradle-plugin")
+    // prafta-com-008-F02: Firebase(FCM). google-services.json(android/app/, 미커밋)을 처리한다.
+    id("com.google.gms.google-services")
 }
 
 // release signing 설정: android/key.properties 가 존재할 때만 활성.
