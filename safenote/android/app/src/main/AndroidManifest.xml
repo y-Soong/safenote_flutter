@@ -6,7 +6,7 @@
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- RECORD_AUDIO 제거(2026-07-20): 녹음 기능 미사용 — 플레이스토어 심사 대비 미사용 권한 정리 -->
     <!-- ✅ 위치 권한: 출퇴근/TBM 지오펜스 판정용 GPS 취득(앱 실행 시 하드 게이트) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
