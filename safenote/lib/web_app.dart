@@ -1,5 +1,6 @@
 import 'dart:async' show StreamSubscription, TimeoutException;
 import 'dart:collection' show UnmodifiableListView;
+import 'dart:convert' show jsonEncode;
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
@@ -12,6 +13,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:android_id/android_id.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'qr_scan_page.dart';
 
 // 개발 빌드는 LAN dev 서버, 운영 빌드는 InAppLocalhostServer 의 bundled assets 를 로딩한다.
 // 둘 다 --dart-define 으로 외부에서 덮어쓸 수 있다.
@@ -56,6 +58,17 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   //   (메모리 project_prafta_app_perm_native_race — geolocator 와 Activity 단위 충돌로
   //    첫 설치 무한로딩 사고). 권한 요청은 Vue 가 GET_PUSH_TOKEN 을 호출하는 단일 경로에서만 한다.
   StreamSubscription<String>? _tokenRefreshSub;
+
+  // PRAFTA-WEB_001-5: 푸시 알림 "탭(open)" 라우팅 브리지.
+  // - onMessageOpenedApp(백그라운드 상태에서 알림 탭) 구독.
+  // - getInitialMessage(앱 종료 상태에서 알림 탭으로 콜드스타트) 1회 확인.
+  // 수신한 RemoteMessage.data(DATA_PAYLOAD)를 JSON 문자열로 window.__onPushOpened 에 전달한다
+  // (push 모델, _subscribeTokenRefresh 의 window.__onPushTokenRefresh 와 동형). 라우팅 판정은 Vue 몫.
+  // ★비즈니스 로직 금지: 여기서는 data 전달만. 콜드스타트는 페이지 로드 전이라 _pendingPushData 로
+  //   보관했다가 onLoadStop(_pageLoaded)에서 flush 한다.
+  StreamSubscription<RemoteMessage>? _msgOpenedSub;
+  Map<String, dynamic>? _pendingPushData;
+  bool _pageLoaded = false;
 
   /// 숨겨진 file input을 스캔해서 파일이 있으면 강제로 `input` 이벤트 발생
   /// (일부 안드 기기에서 change 이벤트가 누락되는 문제 대응)
@@ -146,6 +159,7 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _localhost?.close();
     _tokenRefreshSub?.cancel(); // prafta-com-008-F02: FCM refresh 구독 해제
+    _msgOpenedSub?.cancel(); // PRAFTA-WEB_001-5: 푸시 탭(open) 구독 해제
     super.dispose();
   }
 
@@ -391,6 +405,50 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     }
   }
 
+  /// SCAN_QR 브리지 핸들러 (결함 1.3-3: 관리자 TBM 일용직 QR 입실).
+  ///
+  /// Vue 가 QR 스캔을 요청한다. 카메라 권한을 확인/요청한 뒤 기존 QrScanPage 를
+  /// Navigator 로 push 하여 스캔 결과(raw 문자열)를 받아 계약대로 반환한다.
+  /// 비즈니스 로직(입실 처리)은 Vue→백엔드 몫이며, 여기서는 raw 값 취득·전달만 한다.
+  ///
+  /// 반환 계약:
+  ///   - 성공:      {status:'OK', payload: raw 문자열}
+  ///   - 사용자취소: {status:'CANCELLED'}
+  ///   - 권한거부:   {status:'PERMISSION_DENIED'}
+  ///   - 예외:      {status:'ERROR'}
+  Future<Map<String, dynamic>> _handleScanQr() async {
+    try {
+      // 1) 카메라 권한 확인/요청(거부 시 PERMISSION_DENIED).
+      var status = await Permission.camera.status;
+      if (!status.isGranted) {
+        status = await Permission.camera.request();
+      }
+      if (!status.isGranted) {
+        debugPrint('[SCAN_QR] 카메라 권한 거부: $status');
+        return {'status': 'PERMISSION_DENIED'};
+      }
+
+      // async gap 이후 context 사용 전 위젯 생존 확인.
+      if (!mounted) return {'status': 'ERROR'};
+
+      // 2) 기존 QrScanPage push -> 스캔 결과(raw 문자열) 수신. 취소/닫기는 null 반환.
+      final raw = await Navigator.of(context).push<String>(
+        MaterialPageRoute(builder: (_) => const QrScanPage()),
+      );
+
+      if (raw == null || raw.isEmpty) {
+        debugPrint('[SCAN_QR] 사용자 취소 또는 빈 결과');
+        return {'status': 'CANCELLED'};
+      }
+
+      debugPrint('[SCAN_QR] OK len=${raw.length}');
+      return {'status': 'OK', 'payload': raw};
+    } catch (e) {
+      debugPrint('[SCAN_QR] 스캔 실패: $e');
+      return {'status': 'ERROR'};
+    }
+  }
+
   /// prafta-com-008-F02: FCM 토큰 refresh 를 Vue 로 push 한다.
   ///
   /// onTokenRefresh 발화 시 window.__onPushTokenRefresh(token) 콜백을 호출한다(push 모델).
@@ -414,6 +472,64 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
         debugPrint('[PUSH_TOKEN_REFRESH] 구독 오류: $e');
       },
     );
+  }
+
+  /// PRAFTA-WEB_001-5: 푸시 알림 탭(open) 라우팅 구독.
+  ///
+  /// - onMessageOpenedApp: 앱이 백그라운드일 때 알림을 탭해 복귀한 경우.
+  /// - getInitialMessage: 앱이 종료 상태일 때 알림을 탭해 콜드스타트한 경우(1회).
+  /// 둘 다 RemoteMessage.data 를 window.__onPushOpened 로 전달한다(라우팅은 Vue 몫).
+  /// 구독은 앱 1회만 설정(onWebViewCreated)하고 dispose 에서 해제한다.
+  void _subscribeMessageOpened() {
+    _msgOpenedSub?.cancel();
+    _msgOpenedSub = FirebaseMessaging.onMessageOpenedApp.listen(
+      (message) {
+        debugPrint('[PUSH_OPENED] onMessageOpenedApp 수신');
+        _dispatchPushOpened(message);
+      },
+      onError: (e) {
+        debugPrint('[PUSH_OPENED] 구독 오류: $e');
+      },
+    );
+
+    // 콜드스타트(종료 상태에서 알림 탭) 초기 메시지 1회 확인. 페이지 로드 전이면 보관 후 flush.
+    // ignore: discarded_futures
+    FirebaseMessaging.instance.getInitialMessage().then((message) {
+      if (message != null) {
+        debugPrint('[PUSH_OPENED] getInitialMessage 수신(콜드스타트)');
+        _dispatchPushOpened(message);
+      }
+    }).catchError((e) {
+      debugPrint('[PUSH_OPENED] getInitialMessage 실패: $e');
+    });
+  }
+
+  /// RemoteMessage.data(DATA_PAYLOAD)를 Vue 로 전달한다.
+  /// 페이지 미로드(콜드스타트) 상태면 _pendingPushData 로 보관했다가 onLoadStop 에서 flush 한다.
+  void _dispatchPushOpened(RemoteMessage message) {
+    final data = message.data;
+    if (data.isEmpty) return;
+    if (!_pageLoaded || _ctl == null) {
+      _pendingPushData = data;
+      return;
+    }
+    _evalPushOpened(data);
+  }
+
+  /// data(Map)를 JSON 문자열로 직렬화하여 window.__onPushOpened 호출.
+  void _evalPushOpened(Map<String, dynamic> data) {
+    final ctl = _ctl;
+    if (ctl == null) return;
+    try {
+      final json = jsonEncode(data);
+      // ignore: discarded_futures
+      ctl.evaluateJavascript(
+        source:
+            "window.__onPushOpened && window.__onPushOpened(${jsStringLiteral(json)})",
+      );
+    } catch (e) {
+      debugPrint('[PUSH_OPENED] dispatch 실패: $e');
+    }
   }
 
   InAppWebViewSettings _settings() => InAppWebViewSettings(
@@ -618,9 +734,24 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                     },
                   );
 
+                  // SCAN_QR 브리지 (결함 1.3-3): 관리자 TBM 일용직 QR 입실 스캔 pull.
+                  // 응답 계약: {status:'OK', payload:<raw>} | {status:'CANCELLED'}
+                  //   | {status:'PERMISSION_DENIED'} | {status:'ERROR'}
+                  // 스캔 결과 raw 만 전달(비즈니스 로직 금지). 입실 처리는 Vue→백엔드 몫.
+                  _ctl?.addJavaScriptHandler(
+                    handlerName: 'SCAN_QR',
+                    callback: (args) async {
+                      return await _handleScanQr();
+                    },
+                  );
+
                   // 토큰 refresh push (prafta-com-008-F02): onTokenRefresh -> window.__onPushTokenRefresh.
                   // 컨트롤러 확보 후 1회 구독(dispose 에서 해제).
                   _subscribeTokenRefresh();
+
+                  // 푸시 탭(open) 라우팅 (PRAFTA-WEB_001-5): onMessageOpenedApp/getInitialMessage
+                  // -> window.__onPushOpened. 컨트롤러 확보 후 1회 구독(dispose 에서 해제).
+                  _subscribeMessageOpened();
 
                   await _openInitialUrl(controller);
                 },
@@ -633,6 +764,15 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                 onLoadStop: (controller, url) async {
                   setState(() => _status = 'pageFinished: $url');
                   debugPrint('onLoadStop: $url');
+
+                  // PRAFTA-WEB_001-5: 페이지 로드 완료 표시 + 콜드스타트 보류 푸시 payload flush.
+                  //   (window.__onPushOpened 는 Vue 가 App.vue onMounted 에서 등록 → 페이지 로드 후 호출)
+                  _pageLoaded = true;
+                  final pending = _pendingPushData;
+                  if (pending != null) {
+                    _pendingPushData = null;
+                    _evalPushOpened(pending);
+                  }
 
                   try {
                     await controller.evaluateJavascript(source: _consoleBridgeJS);
