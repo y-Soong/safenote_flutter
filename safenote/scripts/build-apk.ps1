@@ -24,13 +24,15 @@
 param(
     [string]$Ip,
     [int]$Port = 8080,
+    [string]$BaseUrl,   # 운영 배포용: 전체 URL 직접 지정(예: https://api.prafta.com). 지정 시 IP/Port 무시.
     [switch]$NoSync,
     [switch]$Debug
 )
 $ErrorActionPreference = 'Stop'
 
 # 1) LAN IPv4 자동 탐지 (기본 게이트웨이 있는 Up 어댑터 = 실제 네트워크 연결)
-if (-not $Ip) {
+#    -BaseUrl 이 지정되면 IP 탐지를 건너뛴다(운영 도메인 직접 주입).
+if (-not $BaseUrl -and -not $Ip) {
     $candidates = Get-NetIPConfiguration |
         Where-Object { $null -ne $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' }
     if (-not $candidates) {
@@ -44,13 +46,13 @@ if (-not $Ip) {
     }
     $Ip = ($candidates | Select-Object -First 1).IPv4Address.IPAddress
 }
-if ([string]::IsNullOrWhiteSpace($Ip)) {
-    throw "[build-apk] 사용할 IP 가 비어 있습니다. -Ip <주소> 로 지정해 주세요."
+if (-not $BaseUrl -and [string]::IsNullOrWhiteSpace($Ip)) {
+    throw "[build-apk] 사용할 IP 가 비어 있습니다. -Ip <주소> 또는 -BaseUrl <URL> 로 지정해 주세요."
 }
 
-$BaseUrl = "http://${Ip}:${Port}"
+if (-not $BaseUrl) { $BaseUrl = "http://${Ip}:${Port}" }
 $Mode = if ($Debug) { "debug" } else { "release" }
-Write-Host "[build-apk] 사용 IP        : $Ip" -ForegroundColor Cyan
+if ($Ip) { Write-Host "[build-apk] 사용 IP        : $Ip" -ForegroundColor Cyan }
 Write-Host "[build-apk] APP_BASE_URL   : $BaseUrl" -ForegroundColor Cyan
 Write-Host "[build-apk] 빌드 모드       : $Mode"
 
