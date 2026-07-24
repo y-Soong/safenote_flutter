@@ -860,14 +860,15 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                   child: LinearProgressIndicator(),
                 ),
 
-              Positioned(
-                bottom: 8, left: 8, right: 8,
-                child: Text(
-                  _status,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 12),
+              if (!kReleaseMode)
+                Positioned(
+                  bottom: 8, left: 8, right: 8,
+                  child: Text(
+                    _status,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 12),
+                  ),
                 ),
-              ),
             ],
           ),
         ),
