@@ -18,7 +18,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "com.prafta.safenote"
+    namespace = "com.prafta.app"
     compileSdk = 36 // ✅ mobile_scanner, webview_flutter_android 요구사항 충족
     ndkVersion = flutter.ndkVersion
 
@@ -33,7 +33,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.prafta.safenote"
+        applicationId = "com.prafta.app"
         minSdk = flutter.minSdkVersion
         targetSdk = 36 // ✅ compileSdk와 동일하게 유지
         versionCode = flutter.versionCode

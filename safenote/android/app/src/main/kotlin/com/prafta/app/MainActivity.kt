@@ -1,4 +1,4 @@
-package com.prafta.safenote
+package com.prafta.app
 
 import io.flutter.embedding.android.FlutterActivity
 
