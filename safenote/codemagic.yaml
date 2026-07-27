@@ -1,0 +1,51 @@
+# Codemagic CI — iOS TestFlight 배포 워크플로 (맥 없이 클라우드 macOS 머신으로 빌드/서명/업로드)
+#
+# [사전 준비 — Codemagic 웹 UI에서 1회 설정]
+#   1. codemagic.io 가입 → 이 저장소(safenote_flutter) 연결 (GitHub 연동).
+#   2. Apple Developer Program 가입 후 App Store Connect 에서 API 키 발급:
+#      App Store Connect → 사용자 및 액세스 → 통합(Integrations) → App Store Connect API → 키 생성(App Manager 권한).
+#      발급된 .p8 파일 + Key ID + Issuer ID 3종을 Codemagic 팀 설정 → 통합 → App Store Connect 에 등록.
+#      등록 이름을 아래 integrations.app_store_connect 값(prafta-asc)과 일치시킬 것.
+#   3. App Store Connect 에서 앱 최초 생성(번들ID com.prafta.app 등록 포함)은 웹에서 수동 1회.
+#
+# [서명] ios_signing 블록 = Codemagic 이 API 키로 배포 인증서/프로비저닝 프로파일을
+#   자동 발급·관리(맥/키체인 불필요). 수동 인증서 업로드 불필요.
+#
+# [빌드 트리거] 기본 수동 실행(웹 UI Start new build). 자동 트리거가 필요해지면 triggering 블록 추가.
+
+workflows:
+  ios-testflight:
+    name: iOS TestFlight 배포
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: prafta-asc # Codemagic UI에 등록한 App Store Connect API 키 이름
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.prafta.app
+      vars:
+        APP_BASE_URL: "https://api.prafta.com" # 릴리즈 API 주소(웹뷰 window.__APP_BASE_URL__ 주입용)
+    scripts:
+      - name: Flutter 의존성 설치
+        script: |
+          flutter pub get
+      - name: 서명 프로파일 적용
+        script: |
+          xcode-project use-profiles
+      - name: iOS IPA 빌드 (APP_BASE_URL 주입)
+        script: |
+          flutter build ipa --release \
+            --dart-define=APP_BASE_URL=$APP_BASE_URL \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        # 스토어 심사 자동 제출은 하지 않는다(TestFlight까지만) — 심사 제출은 App Store Connect 웹에서 수동.

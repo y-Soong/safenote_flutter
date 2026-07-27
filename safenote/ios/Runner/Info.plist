@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>safenote</string>
+	<string>PRAFTA</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -49,5 +49,18 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- 수출 규정(암호화) 문답 생략: HTTPS 표준 암호화만 사용 — TestFlight 빌드마다 묻는 것 방지 -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<!-- ATS 예외: ① release 는 번들 Vue 자산을 http://localhost(InAppLocalhostServer)로 서빙
+	     ② 웹뷰 내부 콘텐츠(카카오 지도 타일 등 http 서브리소스)는 WebContent 한정 완화.
+	     안드로이드 release 네트워크 하드닝(평문차단, 예외=localhost·kakao 타일)과 동일 취지. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
 </dict>
 </plist>
