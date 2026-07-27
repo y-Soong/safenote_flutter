@@ -1,7 +1,10 @@
 # Codemagic CI — iOS TestFlight 배포 워크플로 (맥 없이 클라우드 macOS 머신으로 빌드/서명/업로드)
 #
+# ★이 파일은 반드시 저장소 루트(PRAFTA_FLUTTER/)에 있어야 Codemagic 이 인식한다.
+#   Flutter 프로젝트는 safenote/ 하위라 workflow 에 working_directory 를 지정한다.
+#
 # [사전 준비 — Codemagic 웹 UI에서 1회 설정]
-#   1. codemagic.io 가입 → 이 저장소(safenote_flutter) 연결 (GitHub 연동).
+#   1. codemagic.io 가입 → 이 저장소(y-Soong/safenote_flutter) 연결 (GitHub 연동).
 #   2. Apple Developer Program 가입 후 App Store Connect 에서 API 키 발급:
 #      App Store Connect → 사용자 및 액세스 → 통합(Integrations) → App Store Connect API → 키 생성(App Manager 권한).
 #      발급된 .p8 파일 + Key ID + Issuer ID 3종을 Codemagic 팀 설정 → 통합 → App Store Connect 에 등록.
@@ -18,6 +21,7 @@ workflows:
     name: iOS TestFlight 배포
     instance_type: mac_mini_m2
     max_build_duration: 60
+    working_directory: safenote
     integrations:
       app_store_connect: prafta-asc # Codemagic UI에 등록한 App Store Connect API 키 이름
     environment:
