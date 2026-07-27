@@ -209,11 +209,12 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
 
   Future<void> _ensureRuntimePermissions() async {
     if (Platform.isAndroid) {
+      // Permission.photos 제거(2026-07-27): READ_MEDIA_IMAGES 매니페스트 삭제(사진 선택은
+      //   웹뷰 file input → 시스템 피커라 권한 불필요 — 플레이스토어 사진/동영상 정책 대응).
+      // Permission.microphone 제거: RECORD_AUDIO 매니페스트 삭제(07-20) 이후 항상 거부되는 죽은 요청.
       final results = await [
         Permission.camera,
-        Permission.photos,   // Android 13+: READ_MEDIA_IMAGES
-        Permission.storage,  // Android 12 이하 호환
-        Permission.microphone,
+        Permission.storage,  // Android 12 이하 호환 (매니페스트 maxSdkVersion=32)
       ].request();
       debugPrint('Permissions: $results');
     }
