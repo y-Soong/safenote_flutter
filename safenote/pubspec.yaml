@@ -34,7 +34,7 @@ dependencies:
   webview_flutter_android: ^4.10.5
   webview_flutter_wkwebview: ^3.10.0
 #  permission_handler: ^11.4.0
-  mobile_scanner: ^6.0.2   # ✅ 네이티브 QR 스캐너
+  mobile_scanner: ^7.4.0   # ✅ 네이티브 QR 스캐너
   flutter_inappwebview: ^6.0.0
   permission_handler: ^12.0.1
   geolocator: ^13.0.1      # ✅ 현재 위치 취득(Position.isMocked 지원) — GET_GPS 브리지/위치 하드 게이트
