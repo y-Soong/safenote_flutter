@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- APNs 환경. 맥/Xcode 없이 Codemagic(app_store 배포 서명)으로만 빌드하므로 production 고정.
+	     ★개발 서명(development)으로 실기기 디버그 빌드를 하게 되면 이 값을 development 로 바꿔야
+	       푸시 토큰이 발급된다. TestFlight/App Store 빌드는 production 이 맞다. -->
+	<key>aps-environment</key>
+	<string>production</string>
+</dict>
+</plist>

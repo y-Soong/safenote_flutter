@@ -26,6 +26,16 @@
     <string>QR 코드 인식을 위해 카메라 접근이 필요합니다.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
     <string>출퇴근/TBM 위치 확인을 위해 현재 위치 접근이 필요합니다.</string>
+	<!-- 웹뷰 내부 <input type="file"> 로 사진을 첨부할 때(아차사고 보고 등) 사진 라이브러리에 접근한다.
+	     이 문구가 없으면 iOS 가 앱을 강제 종료시킨다(심사 리젝 사유). -->
+	<key>NSPhotoLibraryUsageDescription</key>
+    <string>보고서에 사진을 첨부하기 위해 사진 접근이 필요합니다.</string>
+	<!-- FCM 백그라운드 수신(main.dart 의 onBackgroundMessage 핸들러) 전제. 없으면 백그라운드 푸시가
+	     앱을 깨우지 못한다. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
