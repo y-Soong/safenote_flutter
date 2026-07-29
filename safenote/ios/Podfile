@@ -1,0 +1,58 @@
+# PRAFTA iOS Podfile (2026-07-29 수동 작성)
+# flutter build 가 자동 생성하는 기본 템플릿에는 permission_handler 의 iOS 권한 매크로가 없어
+# Permission.camera.request() 가 프롬프트 없이 즉시 거부된다(PERMISSION_CAMERA 기본값 0 = 컴파일 제외).
+# → post_install 에서 필요한 권한 매크로만 명시적으로 켠다. 새 권한을 쓰게 되면 여기에 추가할 것.
+#   (위치는 geolocator 가 CoreLocation 을 직접 쓰므로 매크로 불필요)
+
+# mobile_scanner 6.x 최소 요구 = iOS 15.5 (프로젝트 IPHONEOS_DEPLOYMENT_TARGET 과 일치)
+platform :ios, '15.5'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+  use_modular_headers!
+
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
+        '$(inherited)',
+        # permission_handler: QR 스캔/웹뷰 카메라용. 이 매크로가 없으면 카메라 권한 요청이
+        # 시스템 프롬프트 없이 영구거부로 떨어지고 iOS 설정 앱에 토글도 생기지 않는다.
+        'PERMISSION_CAMERA=1',
+      ]
+    end
+  end
+end
