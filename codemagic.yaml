@@ -47,7 +47,11 @@ workflows:
           xcode-project use-profiles
       - name: iOS IPA 빌드 (APP_BASE_URL 주입)
         script: |
+          # 빌드번호: pubspec(+4)은 안드로이드 versionCode 흐름과 공유라 건드리지 않고,
+          # iOS 는 Codemagic 빌드 카운터(+100 오프셋)로 CFBundleVersion 을 단조증가 주입.
+          # (TestFlight 는 동일 빌드번호 재업로드를 거부한다 — 첫 업로드가 4번을 이미 사용)
           flutter build ipa --release \
+            --build-number=$((PROJECT_BUILD_NUMBER + 100)) \
             --dart-define=APP_BASE_URL=$APP_BASE_URL \
             --export-options-plist=/Users/builder/export_options.plist
     artifacts:
