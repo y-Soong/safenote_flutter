@@ -11,8 +11,11 @@
 #      등록 이름을 아래 integrations.app_store_connect 값(prafta-asc)과 일치시킬 것.
 #   3. App Store Connect 에서 앱 최초 생성(번들ID com.prafta.app 등록 포함)은 웹에서 수동 1회.
 #
-# [서명] ios_signing 블록 = Codemagic 이 API 키로 배포 인증서/프로비저닝 프로파일을
-#   자동 발급·관리(맥/키체인 불필요). 수동 인증서 업로드 불필요.
+# [서명] 수동 서명(2026-07-29 전환). 자동 서명(distribution_type/bundle_identifier)은
+#   사전검증 단계에서 "No matching profiles found"로 즉사해 폐기 — Admin 키로도 동일 증상.
+#   인증서/프로파일은 App Store Connect API 를 직접 호출해 생성했고(로컬 보관: Documents\apple_keys),
+#   Codemagic UI → Team settings → Code signing identities 에 업로드한 참조명을 아래에서 사용한다.
+#   참조명(글자 단위 일치 필수): 인증서=prafta_dist_cert / 프로파일=prafta_appstore_profile
 #
 # [빌드 트리거] 기본 수동 실행(웹 UI Start new build). 자동 트리거가 필요해지면 triggering 블록 추가.
 
@@ -29,8 +32,10 @@ workflows:
       xcode: latest
       cocoapods: default
       ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.prafta.app
+        certificates:
+          - prafta_dist_cert
+        provisioning_profiles:
+          - prafta_appstore_profile
       vars:
         APP_BASE_URL: "https://api.prafta.com" # 릴리즈 API 주소(웹뷰 window.__APP_BASE_URL__ 주입용)
     scripts:
