@@ -1,8 +1,17 @@
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'location_gate.dart'; // 👈 위치권한 하드 게이트
 import 'camera_gate.dart'; // 👈 카메라권한 하드 게이트
+import 'firebase_options.dart'; // FlutterFire CLI 생성(iOS 전용 구성)
+
+// iOS 는 FlutterFire CLI 가 생성한 Dart 옵션(firebase_options.dart)으로 초기화한다
+// (GoogleService-Info.plist 를 번들하지 않는 Dart-only 구성).
+// 안드로이드는 기존대로 네이티브 리소스(google-services.json)로 초기화하므로 null 을 넘긴다
+// — firebase_options.dart 는 iOS 만 구성돼 있어 android 에서 currentPlatform 을 부르면 throw 된다.
+FirebaseOptions? get _firebaseOptionsForPlatform =>
+    defaultTargetPlatform == TargetPlatform.iOS ? DefaultFirebaseOptions.ios : null;
 
 // prafta-com-008-F02: FCM 백그라운드 메시지 핸들러.
 // firebase_messaging 은 백그라운드 수신 시 별도 isolate 에서 top-level(또는 static) 함수를
@@ -11,7 +20,13 @@ import 'camera_gate.dart'; // 👈 카메라권한 하드 게이트
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // 백그라운드 isolate 에서도 Firebase 초기화가 선행되어야 한다.
-  await Firebase.initializeApp();
+  // try/catch 가 없으면 초기화 실패 시 이 isolate 가 죽어 백그라운드 푸시 수신이 무력화된다.
+  try {
+    await Firebase.initializeApp(options: _firebaseOptionsForPlatform);
+  } catch (e) {
+    debugPrint('[FCM] 백그라운드 isolate Firebase 초기화 실패: $e');
+    return;
+  }
   // 비즈니스 로직 금지: 수신 사실만 로깅(페이로드 본문은 로깅하지 않음 — 최소 수집).
   debugPrint('[FCM] 백그라운드 메시지 수신: ${message.messageId}');
 }
@@ -23,7 +38,7 @@ Future<void> main() async {
   // prafta-com-008-F02: Firebase 초기화(FCM 전제). google-services.json 미배치 시 빌드에서
   // 실패하므로(배치는 사용자 몫), 런타임 예외는 격리하여 앱 기동 자체는 막지 않는다.
   try {
-    await Firebase.initializeApp();
+    await Firebase.initializeApp(options: _firebaseOptionsForPlatform);
     // 백그라운드 메시지 핸들러는 초기화 직후 1회만 등록한다.
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
   } catch (e) {
