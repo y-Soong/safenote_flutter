@@ -13,11 +13,35 @@ class _QrScanPageState extends State<QrScanPage> {
     // torchEnabled: true,       // 필요시 기본 플래시 ON
     // facing: CameraFacing.back,
     detectionSpeed: DetectionSpeed.noDuplicates,
+    // 안드로이드 전용 옵션(iOS 무시). mobile_scanner 7.4.0 은 ImageAnalysis 해상도를
+    // 프리뷰 사이즈로 Flutter 에 보고하는데, 미지정 시 기본 1920x1080(16:9)이 강제되어
+    // 실제 Preview 스트림(CameraX 기본 4:3)과 화면비가 어긋나면 프리뷰 하단이 검게 남는다.
+    // 4:3 으로 명시해 보고 사이즈와 실제 스트림 화면비를 정렬한다.
+    cameraResolution: const Size(1440, 1080),
   );
   bool _handled = false;
+  bool _sizeLogged = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 실기기 검증용: 네이티브가 보고한 프리뷰 사이즈/방향 1회 로깅 (adb logcat 확인).
+    _controller.addListener(_logPreviewSize);
+  }
+
+  void _logPreviewSize() {
+    final v = _controller.value;
+    if (_sizeLogged || !v.isInitialized || v.size == Size.zero) return;
+    _sizeLogged = true;
+    debugPrint(
+      '[QR_PREVIEW] size=${v.size.width.toInt()}x${v.size.height.toInt()}'
+      ' orientation=${v.deviceOrientation}',
+    );
+  }
 
   @override
   void dispose() {
+    _controller.removeListener(_logPreviewSize);
     _controller.dispose();
     super.dispose();
   }
@@ -42,6 +66,8 @@ class _QrScanPageState extends State<QrScanPage> {
           MobileScanner(
             controller: _controller,
             onDetect: _onDetect,
+            // 기본값과 동일하지만 전체화면 크롭 의도를 명시(화면비 검증 이슈 재발 방지).
+            fit: BoxFit.cover,
           ),
           // 상단 닫기 버튼
           SafeArea(
