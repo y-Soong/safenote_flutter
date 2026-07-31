@@ -450,6 +450,26 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     }
   }
 
+  /// OPEN_APP_SETTINGS 브리지 핸들러.
+  ///
+  /// 권한이 영구 거부된 뒤에는 앱 안에서 다시 물을 수단이 없고(iOS 는 시스템 권한
+  /// 프롬프트를 최초 1회만 띄운다) 설정 앱에서 직접 켜는 길밖에 없다. 그런데
+  /// 웹뷰에서 `window.location = 'app-settings:'` 로는 열리지 않는다 — 네이티브
+  /// 전용 스킴이라 WKWebView 가 네비게이션에 실패하며 화면이 로딩 상태로 멈춘다.
+  /// 그래서 네이티브가 대신 연다(permission_handler 의 openAppSettings).
+  ///
+  /// 반환: {status:'OK'} | {status:'ERROR'}
+  Future<Map<String, dynamic>> _handleOpenAppSettings() async {
+    try {
+      final opened = await openAppSettings();
+      debugPrint('[OPEN_APP_SETTINGS] opened=$opened');
+      return {'status': opened ? 'OK' : 'ERROR'};
+    } catch (e) {
+      debugPrint('[OPEN_APP_SETTINGS] 실패: $e');
+      return {'status': 'ERROR'};
+    }
+  }
+
   /// prafta-com-008-F02: FCM 토큰 refresh 를 Vue 로 push 한다.
   ///
   /// onTokenRefresh 발화 시 window.__onPushTokenRefresh(token) 콜백을 호출한다(push 모델).
@@ -743,6 +763,16 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                     handlerName: 'SCAN_QR',
                     callback: (args) async {
                       return await _handleScanQr();
+                    },
+                  );
+
+                  // OPEN_APP_SETTINGS 브리지: 권한 거부 폴백 화면의 '설정으로 이동'.
+                  // 응답 계약: {status:'OK'} | {status:'ERROR'}
+                  // 웹뷰에서 window.location='app-settings:' 로는 열 수 없다(네이티브 전용 스킴).
+                  _ctl?.addJavaScriptHandler(
+                    handlerName: 'OPEN_APP_SETTINGS',
+                    callback: (args) async {
+                      return await _handleOpenAppSettings();
                     },
                   );
 
