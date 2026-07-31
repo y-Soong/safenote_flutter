@@ -3,13 +3,17 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'web_app.dart';
 
-/// 카메라권한 하드 게이트.
+/// 카메라권한 안내 게이트(소프트 게이트).
 ///
-/// 앱 기동 시(위치권한 게이트 통과 후) 카메라권한을 필수로 요구한다. 권한이
-/// 허용되기 전에는 웹뷰(WebApp)로 진입할 수 없다. 즉 카메라 미동의 = 앱 사용 불가.
+/// 앱 기동 시(위치권한 게이트 다음) 카메라권한을 먼저 안내·요청하되, **거부해도
+/// 앱을 계속 쓸 수 있다**('나중에 하기'). 미허용 상태에서 QR 스캔을 실행하면
+/// `web_app.dart` 의 SCAN_QR 브리지가 그 시점에 다시 요청하고, 거부 시
+/// `PERMISSION_DENIED` 를 Vue 로 돌린다. 웹뷰 안 스캐너(순회점검 QR)는 iOS 가
+/// getUserMedia 시점에 직접 물으며, 실패하면 QrScanner.vue 의 카메라 폴백 화면이 뜬다.
 ///
-/// QR 스캔(안전점검 입실/점검 개소 인식)이 앱의 핵심 동선이므로 위치권한과
-/// 동일하게 하드 게이트로 둔다.
+/// ★하드 게이트(미동의 = 앱 사용 불가)에서 전환한 이유: App Store 심사
+/// 가이드라인 5.1.1 은 권한 거부 시에도 앱이 동작할 것을 요구한다. 카메라는 QR
+/// 스캔·사진 첨부에만 쓰이므로 앱 전체를 막으면 리젝 사유가 된다. 되돌리지 말 것.
 ///
 /// - 권한 거부(denied) → 재요청 버튼.
 /// - 영구 거부(permanentlyDenied) / 제한(restricted) → openAppSettings() 로
@@ -37,6 +41,7 @@ enum _GateStatus {
 class _CameraGateState extends State<CameraGate> with WidgetsBindingObserver {
   _GateStatus _status = _GateStatus.checking;
   bool _busy = false; // 중복 요청 방지
+  bool _skipped = false; // '나중에 하기' 선택 — 미허용 상태로 앱 진입
 
   @override
   void initState() {
@@ -55,7 +60,10 @@ class _CameraGateState extends State<CameraGate> with WidgetsBindingObserver {
   /// 앱 설정 화면(영구거부 시) 다녀온 뒤 복귀하면 권한을 재평가한다.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed || _status == _GateStatus.granted) {
+    // 이미 앱으로 진입한 뒤(허용 또는 건너뜀)에는 재평가하지 않는다.
+    if (state != AppLifecycleState.resumed ||
+        _status == _GateStatus.granted ||
+        _skipped) {
       return;
     }
     if (_busy) {
@@ -123,10 +131,17 @@ class _CameraGateState extends State<CameraGate> with WidgetsBindingObserver {
     await openAppSettings();
   }
 
+  /// '나중에 하기' — 권한 없이 앱으로 진입한다. 카메라가 필요한 기능은 그 시점에
+  /// 다시 요청되고, 거부되면 각 화면에서 안내된다.
+  void _skipForNow() {
+    if (!mounted) return;
+    setState(() => _skipped = true);
+  }
+
   @override
   Widget build(BuildContext context) {
-    // 허용된 경우에만 다음 위젯(웹뷰)으로 진입.
-    if (_status == _GateStatus.granted) {
+    // 허용됐거나 사용자가 건너뛴 경우 다음 위젯(웹뷰)으로 진입.
+    if (_status == _GateStatus.granted || _skipped) {
       return widget.next;
     }
     return Scaffold(
@@ -156,9 +171,10 @@ class _CameraGateState extends State<CameraGate> with WidgetsBindingObserver {
       case _GateStatus.denied:
         return _gateMessage(
           icon: Icons.photo_camera,
-          title: '카메라 권한이 필요합니다',
-          desc: '이 앱은 QR 스캔과 현장 사진 촬영을 위해 카메라 권한이 반드시 필요합니다.\n'
-              '권한을 허용해야 앱을 사용할 수 있습니다.',
+          title: '카메라 권한을 허용해 주세요',
+          desc: 'QR 스캔과 현장 사진 촬영에만 사용합니다.\n'
+              '지금 허용하지 않아도 앱은 사용할 수 있으며,\n'
+              'QR 스캔을 시작할 때 다시 요청합니다.',
           primaryLabel: '카메라 권한 허용하기',
           onPrimary: () => _evaluateAndRequest(),
         );
@@ -167,8 +183,9 @@ class _CameraGateState extends State<CameraGate> with WidgetsBindingObserver {
         return _gateMessage(
           icon: Icons.settings,
           title: '카메라 권한이 차단되어 있습니다',
-          desc: '카메라 권한이 영구적으로 거부되었습니다.\n'
-              '앱 설정 화면에서 카메라 권한을 직접 허용해 주세요.',
+          desc: '앱 설정 화면에서 카메라 권한을 허용하면\n'
+              'QR 스캔과 사진 촬영을 쓸 수 있습니다.\n'
+              '허용하지 않아도 나머지 기능은 사용할 수 있습니다.',
           primaryLabel: '앱 설정 열기',
           onPrimary: _openAppSettings,
           secondaryLabel: '다시 확인',
@@ -225,6 +242,15 @@ class _CameraGateState extends State<CameraGate> with WidgetsBindingObserver {
             ),
           ),
         ],
+        // 권한 없이 진입하는 경로. 심사 가이드라인 5.1.1 대응이므로 항상 노출한다.
+        const SizedBox(height: 8),
+        SizedBox(
+          width: double.infinity,
+          child: TextButton(
+            onPressed: _skipForNow,
+            child: const Text('나중에 하기'),
+          ),
+        ),
       ],
     );
   }

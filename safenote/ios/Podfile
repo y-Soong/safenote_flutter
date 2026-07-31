@@ -52,6 +52,15 @@ post_install do |installer|
         # permission_handler: QR 스캔/웹뷰 카메라용. 이 매크로가 없으면 카메라 권한 요청이
         # 시스템 프롬프트 없이 영구거부로 떨어지고 iOS 설정 앱에 토글도 생기지 않는다.
         'PERMISSION_CAMERA=1',
+        # geolocator: '항상 허용'(배경 위치) API 참조를 컴파일에서 제외한다.
+        # 이 앱은 whileInUse 만 쓰는데(location_gate.dart), geolocator 는
+        # requestAlwaysAuthorization 을 무조건 컴파일해 애플 정적 스캔이
+        # NSLocationAlwaysAndWhenInUseUsageDescription 문구를 요구한다(ITMS-90683).
+        # 쓰지도 않는 배경 위치 권한을 선언하는 대신 참조 자체를 없앤다 —
+        # geolocator 가 이 용도로 공식 제공하는 매크로다(심사 스크루티니 회피 목적 명시).
+        # 권한 요청 경로는 그대로 살아있다: geolocator 는 Info.plist 의
+        # NSLocationWhenInUseUsageDescription 을 먼저 보고 whileInUse 를 요청한다.
+        'BYPASS_PERMISSION_LOCATION_ALWAYS=1',
       ]
     end
   end
