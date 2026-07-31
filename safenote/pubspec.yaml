@@ -115,8 +115,15 @@ flutter:
 
 flutter_launcher_icons:
   android: true
-  ios: false
+  ios: true
   image_path: "assets/icons/app_icon.png"
+  # iOS 는 전용 소스를 쓴다. app_icon.png 는 510x460 비정사각이라 그대로 넣으면
+  # 정사각으로 찌그러진다. app_icon_ios.png = store_icon_512(플레이스토어 등록본,
+  # 안드로이드 런처 아이콘과 동일한 그림)를 1024 정사각·흰배경으로 만든 것.
+  image_path_ios: "assets/icons/app_icon_ios.png"
+  # iOS 아이콘에 알파 채널이 있으면 App Store 업로드가 거부된다(소스에서 이미
+  # 제거했지만 생성 단계에서도 보장한다).
+  remove_alpha_ios: true
   min_sdk_android: 21
   adaptive_icon_background: "#FFFFFF"
   adaptive_icon_foreground: "assets/icons/app_icon_foreground.png"
