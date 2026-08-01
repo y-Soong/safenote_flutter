@@ -2,9 +2,23 @@ import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'location_gate.dart'; // 👈 위치권한 하드 게이트
 import 'camera_gate.dart'; // 👈 카메라권한 하드 게이트
 import 'firebase_options.dart'; // FlutterFire CLI 생성(iOS 전용 구성)
+
+// 안드로이드 웹뷰 원격 디버깅(chrome://inspect) 토글.
+//
+// ★web_app.dart 의 InAppWebViewSettings.isInspectable 은 iOS/macOS 전용이다
+//   (플러그인 정의: apiName "WKWebView.isInspectable"). 안드로이드는 아래 정적 호출이
+//   없으면 devtools 소켓(webview_devtools_remote_<pid>) 자체가 열리지 않아
+//   chrome://inspect 의 Remote Target 에 앱이 영원히 나타나지 않는다(2026-08-01 실측).
+//
+// 릴리즈에 상시로 켜두면 USB 만 꽂으면 웹뷰 내부(세션 토큰 포함)를 들여다볼 수 있으므로
+// 반드시 빌드 플래그로 게이트한다. 켜서 빌드하려면:
+//   flutter build apk --release --dart-define=WEBVIEW_DEBUG=true
+//   (또는 scripts\build-apk.ps1 -WebviewDebug)
+const bool kWebviewDebug = bool.fromEnvironment('WEBVIEW_DEBUG');
 
 // iOS 는 FlutterFire CLI 가 생성한 Dart 옵션(firebase_options.dart)으로 초기화한다
 // (GoogleService-Info.plist 를 번들하지 않는 Dart-only 구성).
@@ -34,6 +48,17 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 Future<void> main() async {
   // Firebase.initializeApp() 은 플랫폼 채널을 쓰므로 바인딩 초기화가 선행되어야 한다.
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 웹뷰 원격 디버깅(안드로이드 전용, 빌드 플래그로만 활성화 — 상단 kWebviewDebug 주석 참조).
+  // 웹뷰 생성 전에 호출해야 해당 WebView 에 반영된다.
+  if (kWebviewDebug && defaultTargetPlatform == TargetPlatform.android) {
+    try {
+      await InAppWebViewController.setWebContentsDebuggingEnabled(true);
+      debugPrint('[WEBVIEW_DEBUG] 안드로이드 웹뷰 원격 디버깅 활성화 — chrome://inspect');
+    } catch (e) {
+      debugPrint('[WEBVIEW_DEBUG] 활성화 실패(앱 기동은 계속): $e');
+    }
+  }
 
   // prafta-com-008-F02: Firebase 초기화(FCM 전제). google-services.json 미배치 시 빌드에서
   // 실패하므로(배치는 사용자 몫), 런타임 예외는 격리하여 앱 기동 자체는 막지 않는다.

@@ -16,6 +16,9 @@
 #   -Port 8081        백엔드 포트 변경(기본 8080)
 #   -NoSync           Vue 산출물 동기화(sync-vue-app.ps1) 건너뛰기
 #   -Debug            release 대신 debug APK 빌드
+#   -WebviewDebug     안드로이드 웹뷰 원격 디버깅(chrome://inspect) 활성화 APK 빌드
+#                     ※ 진단용 한시 빌드에만 사용. 이 APK 는 USB 만 꽂으면 웹뷰 내부(세션 토큰 포함)가
+#                       들여다보이므로 배포/배부 금지. 상세는 lib\main.dart 의 kWebviewDebug 주석 참조.
 #
 # ※ DHCP 로 PC IP 가 바뀌면 그 IP 로 다시 빌드해야 한다(설치된 APK 에 IP 가 박혀 있으므로).
 #   기기를 USB 로 연결해 개발 중이라면 run-app.ps1(flutter run)이 매 실행 시 현재 IP 를 주입하므로 더 편하다.
@@ -26,7 +29,8 @@ param(
     [int]$Port = 8080,
     [string]$BaseUrl,   # 운영 배포용: 전체 URL 직접 지정(예: https://api.prafta.com). 지정 시 IP/Port 무시.
     [switch]$NoSync,
-    [switch]$Debug
+    [switch]$Debug,
+    [switch]$WebviewDebug
 )
 $ErrorActionPreference = 'Stop'
 
@@ -55,6 +59,9 @@ $Mode = if ($Debug) { "debug" } else { "release" }
 if ($Ip) { Write-Host "[build-apk] 사용 IP        : $Ip" -ForegroundColor Cyan }
 Write-Host "[build-apk] APP_BASE_URL   : $BaseUrl" -ForegroundColor Cyan
 Write-Host "[build-apk] 빌드 모드       : $Mode"
+if ($WebviewDebug) {
+    Write-Host "[build-apk] 웹뷰 원격디버깅 : 활성화 (chrome://inspect) — 진단용, 배포 금지" -ForegroundColor Yellow
+}
 
 $ProjectRoot = (Resolve-Path -Path (Join-Path $PSScriptRoot "..")).Path
 
@@ -71,8 +78,10 @@ if (-not $NoSync) {
 # 3) flutter build apk (APP_BASE_URL 주입)
 Push-Location $ProjectRoot
 try {
-    Write-Host "[build-apk] flutter build apk --$Mode --dart-define=APP_BASE_URL=$BaseUrl"
-    & flutter build apk "--$Mode" "--dart-define=APP_BASE_URL=$BaseUrl"
+    $BuildArgs = @("--$Mode", "--dart-define=APP_BASE_URL=$BaseUrl")
+    if ($WebviewDebug) { $BuildArgs += "--dart-define=WEBVIEW_DEBUG=true" }
+    Write-Host "[build-apk] flutter build apk $($BuildArgs -join ' ')"
+    & flutter build apk @BuildArgs
     if ($LASTEXITCODE -ne 0) { throw "[build-apk] flutter build apk 실패 (exit=$LASTEXITCODE)" }
 } finally {
     Pop-Location

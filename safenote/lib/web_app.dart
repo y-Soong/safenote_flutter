@@ -450,6 +450,40 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     }
   }
 
+  /// REQUEST_CAMERA_PERMISSION 브리지 핸들러.
+  ///
+  /// 웹뷰 QR 스캐너(html5-qrcode)가 getUserMedia 를 부르기 "전"에 네이티브 카메라
+  /// 권한을 확인/요청한다.
+  ///
+  /// ★왜 필요한가 (2026-08-01 갤럭시 실측): 안드로이드 웹뷰는 네이티브 CAMERA 권한이
+  ///   없을 때 getUserMedia 를 NotAllowedError(권한 거부)가 아니라
+  ///   NotReadableError("Could not start video source")로 실패시킨다. 웹 쪽에서는
+  ///   "권한 문제"인지 "카메라 점유"인지 구분할 수 없어 안내가 불가능하므로,
+  ///   웹이 이 브리지로 권한을 선확인한다. (onPermissionRequest GRANT 는 웹뷰 레벨
+  ///   허가일 뿐 OS 권한을 대신하지 못한다.)
+  ///
+  /// 반환 계약: {status:'GRANTED'|'DENIED'|'PERMANENTLY_DENIED'}
+  ///   - PERMANENTLY_DENIED: 다시 묻지 않음(안드) / 프롬프트 소진(iOS) — 설정 이동만 가능.
+  ///   - 예외 시 GRANTED 로 폴백: 여기서 막지 말고 실제 getUserMedia 실패 경로가 처리하게 한다.
+  Future<Map<String, dynamic>> _handleRequestCameraPermission() async {
+    try {
+      var status = await Permission.camera.status;
+      if (!status.isGranted && !status.isPermanentlyDenied) {
+        status = await Permission.camera.request();
+      }
+      final result = status.isGranted
+          ? 'GRANTED'
+          : (status.isPermanentlyDenied || status.isRestricted)
+              ? 'PERMANENTLY_DENIED'
+              : 'DENIED';
+      debugPrint('[REQUEST_CAMERA_PERMISSION] $status -> $result');
+      return {'status': result};
+    } catch (e) {
+      debugPrint('[REQUEST_CAMERA_PERMISSION] 확인 실패(GRANTED 폴백): $e');
+      return {'status': 'GRANTED'};
+    }
+  }
+
   /// OPEN_APP_SETTINGS 브리지 핸들러.
   ///
   /// 권한이 영구 거부된 뒤에는 앱 안에서 다시 물을 수단이 없고(iOS 는 시스템 권한
@@ -773,6 +807,16 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                     handlerName: 'OPEN_APP_SETTINGS',
                     callback: (args) async {
                       return await _handleOpenAppSettings();
+                    },
+                  );
+
+                  // REQUEST_CAMERA_PERMISSION 브리지: 웹뷰 QR 스캐너의 카메라 권한 선확인.
+                  // 응답 계약: {status:'GRANTED'|'DENIED'|'PERMANENTLY_DENIED'}
+                  // 안드 웹뷰가 권한 부재를 NotReadableError 로 뭉개는 문제의 우회 — 상세는 핸들러 주석.
+                  _ctl?.addJavaScriptHandler(
+                    handlerName: 'REQUEST_CAMERA_PERMISSION',
+                    callback: (args) async {
+                      return await _handleRequestCameraPermission();
                     },
                   );
 
