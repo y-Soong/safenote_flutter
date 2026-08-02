@@ -1,7 +1,7 @@
 import 'dart:async' show StreamSubscription, TimeoutException;
 import 'dart:collection' show UnmodifiableListView;
 import 'dart:convert' show jsonEncode;
-import 'dart:io' show Platform;
+import 'dart:io' show HttpClient, Platform;
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -40,6 +40,9 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   InAppLocalhostServer? _localhost;
   int _progress = 0;
   String _status = 'init';
+
+  // 로컬 서버 복구 진행 중 플래그(resume 연타·프로세스 종료 콜백 중복 진입 방지).
+  bool _recoveringLocalhost = false;
 
   DateTime? _lastBackPressedAt; // ✅ 추가
 
@@ -177,11 +180,88 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
         debugPrint('🔎 App RESUMED -> scan hidden file inputs');
         _ctl!.evaluateJavascript(source: _scanPickersJS);
       }
+
+      // 오래 백그라운드에 있다 복귀하면 로컬 서버 소켓이 회수돼 있을 수 있다(_ensureLocalhostAlive 주석).
+      // ★재기동이 실제로 일어났을 때만 리로드한다. resume 마다 무조건 리로드하면
+      //   작성 중이던 신청서·필터 등 Vue 상태가 통째로 날아간다.
+      // ignore: discarded_futures
+      _ensureLocalhostAlive().then((recovered) {
+        if (!recovered || !mounted) return;
+        _ctl?.reload();
+        ScaffoldMessenger.of(context)
+          ..removeCurrentSnackBar()
+          ..showSnackBar(
+            const SnackBar(
+              content: Text('연결이 끊겨 화면을 다시 불러왔어요.'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+      });
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
       // prafta-051-09: 포그라운드 → 백그라운드 전환. 진행분을 누적에 확정.
       _accumulateForeground();
+    }
+  }
+
+  /// 로컬 서버(release 번들 서빙)가 실제로 응답하는지 HTTP 요청으로 확인한다.
+  ///
+  /// `InAppLocalhostServer.isRunning()` 은 내부 플래그만 보므로 소켓이 회수된 뒤에도
+  /// 참을 반환할 수 있다. 그래서 상태값이 아니라 **실제 요청으로 판정**한다.
+  Future<bool> _probeLocalhost() async {
+    HttpClient? client;
+    try {
+      client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+      final req = await client
+          .getUrl(Uri.parse('http://localhost:$_kLocalhostPort/index.html'))
+          .timeout(const Duration(seconds: 2));
+      final res = await req.close().timeout(const Duration(seconds: 2));
+      await res.drain<void>();
+      return res.statusCode == 200;
+    } catch (e) {
+      debugPrint('🩺 로컬 서버 응답 없음: $e');
+      return false;
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
+  /// 로컬 서버가 죽어 있으면 재기동한다. 반환값 = **재기동이 실제로 일어났는지**
+  /// (호출부가 웹뷰 리로드 여부를 판단하는 데 쓴다).
+  ///
+  /// 배경: 앱이 오래 백그라운드에 있으면 iOS 가 로컬 HTTP 서버 소켓을 회수할 수 있다.
+  /// 서버는 initState 에서 한 번만 켜지므로 복귀 후 아무도 되살리지 않고,
+  /// 그 결과 **새로 발생하는 요청만** 조용히 실패한다:
+  ///   - 로고 등 `<img>` 요청 실패 → 이미지가 안 뜸
+  ///   - 라우트 lazy chunk `import()` 실패 → 버튼을 눌러도 화면 이동이 안 됨
+  /// 이미 렌더된 DOM 과 로드된 JS 는 살아 있어 스크롤은 정상이라, 겉보기에는
+  /// "버튼만 안 눌리는" 것처럼 보인다. 앱을 껐다 켜면 initState 가 다시 돌아 정상화된다.
+  Future<bool> _ensureLocalhostAlive() async {
+    if (!kReleaseMode || _recoveringLocalhost) return false;
+    _recoveringLocalhost = true;
+    try {
+      if (await _probeLocalhost()) return false;
+
+      debugPrint('♻️ 로컬 서버 재기동 시도');
+      try {
+        await _localhost?.close();
+      } catch (_) {}
+      _localhost = InAppLocalhostServer(
+        port: _kLocalhostPort,
+        documentRoot: 'assets/vue_app/',
+        directoryIndex: 'index.html',
+      );
+      await _localhost!.start();
+
+      final ok = await _probeLocalhost();
+      debugPrint(ok ? '✅ 로컬 서버 재기동 완료' : '❌ 재기동 후에도 응답 없음');
+      return ok;
+    } catch (e) {
+      debugPrint('❌ 로컬 서버 재기동 실패: $e');
+      return false;
+    } finally {
+      _recoveringLocalhost = false;
     }
   }
 
@@ -926,6 +1006,16 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                 onReceivedError: (controller, request, error) {
                   debugPrint('onReceivedError: ${error.type} ${error.description} for ${request.url}');
                   setState(() => _status = 'error: ${error.type} ${error.description}');
+                },
+
+                // iOS 전용: 메모리 압박으로 WKWebView 의 WebContent 프로세스가 죽으면
+                // 웹뷰가 백지가 되고 어떤 조작도 먹지 않는다. 복구 수단은 reload 뿐이다.
+                // (장수 웹뷰를 띄우는 앱에는 사실상 필수 핸들러다.)
+                // 프로세스가 죽을 만한 상황이면 로컬 서버도 함께 회수됐을 수 있어 먼저 확인한다.
+                onWebContentProcessDidTerminate: (controller) async {
+                  debugPrint('💥 WebContent 프로세스 종료 -> 로컬 서버 확인 후 reload');
+                  await _ensureLocalhostAlive();
+                  await controller.reload();
                 },
               ),
 
