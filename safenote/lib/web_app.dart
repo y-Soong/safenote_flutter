@@ -1,8 +1,8 @@
-import 'dart:async' show StreamSubscription, TimeoutException;
+import 'dart:async' show StreamSubscription, TimeoutException, Timer;
 import 'dart:collection' show UnmodifiableListView;
-import 'dart:convert' show jsonEncode;
+import 'dart:convert' show jsonEncode, jsonDecode, utf8;
 import 'dart:io' show HttpClient, Platform;
-import 'package:flutter/foundation.dart' show kReleaseMode;
+import 'package:flutter/foundation.dart' show kDebugMode, kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -29,6 +29,42 @@ const String _kAppBaseUrl = String.fromEnvironment(
 );
 const int _kLocalhostPort = 8080;
 
+// __SHELL__ 브리지 계약 버전 (웹뷰 원격로딩 전환 T1).
+// ★ addJavaScriptHandler 로 핸들러를 추가/제거할 때 반드시 _kBridgeHandlers 를 함께 갱신하고
+//   버전을 +1 한다. Vue 는 이 목록(window.__SHELL__.handlers)으로 호출 전 지원 여부를 판별한다
+//   (앱FE src/utils/shellCapability.js). 목록 누락 시 신Vue 가 해당 기능을 "셸 미지원"으로
+//   오판해 기능이 조용히 꺼진다.
+const int _kBridgeVersion = 1;
+const List<String> _kBridgeHandlers = [
+  'JS_CONSOLE',
+  'GET_GPS',
+  'GET_DEVICE_INFO',
+  'GET_APP_FOREGROUND_SEC',
+  'GET_PUSH_TOKEN',
+  'SCAN_QR',
+  'OPEN_APP_SETTINGS',
+  'REQUEST_CAMERA_PERMISSION',
+];
+
+// 원격 앱 프론트 호스트(T4, D1: app.prafta.com). --dart-define=APP_REMOTE_URL 로 덮어쓸 수
+// 있고, 빈 문자열로 빌드하면 원격 시도 자체를 하지 않는다(전원 번들 — 비상 빌드용).
+// 평시 원격 중단은 빌드가 아니라 매니페스트 enabled:false(킬 스위치)로 한다.
+const String _kRemoteAppUrl = String.fromEnvironment(
+  'APP_REMOTE_URL',
+  defaultValue: 'https://app.prafta.com',
+);
+
+// 웹뷰 검사 허용(T7 축소) — iOS isInspectable 은 릴리즈에서 WEBVIEW_DEBUG 빌드 시에만 켠다.
+// 안드로이드 setWebContentsDebuggingEnabled(main.dart kWebviewDebug)와 동일 관례·동일 define.
+const bool _kWebviewDebug = bool.fromEnvironment('WEBVIEW_DEBUG');
+
+// 매니페스트(app-manifest.json) 조회 전체 타임아웃(D2: 3초 기본, §7 L-4 실측 후 확정).
+const Duration _kManifestTimeout = Duration(seconds: 3);
+
+// 원격 진입 후 첫 페이지 로드 감시 시한 — 이 안에 onLoadStop 이 오지 않으면 번들 폴백
+// (§7 N-1 "흰 화면 방치 금지"). 저속망 오탐을 피하려 여유 있게 잡는다.
+const Duration _kRemoteLoadWatchdog = Duration(seconds: 12);
+
 class WebApp extends StatefulWidget {
   const WebApp({super.key});
   @override
@@ -43,6 +79,23 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
 
   // 로컬 서버 복구 진행 중 플래그(resume 연타·프로세스 종료 콜백 중복 진입 방지).
   bool _recoveringLocalhost = false;
+
+  // __SHELL__ 주입용 앱 버전(initState 에서 비동기 취득). 취득 전에 로드된 페이지는
+  // onLoadStop 재주입으로 보정된다(__APP_BASE_URL__ 과 동일 패턴).
+  String _appVersion = '';
+
+  // 현재 웹뷰 콘텐츠 로딩 소스(T4). release 는 _openInitialUrl 의 원격/번들 판정 결과
+  // ('remote'|'bundle')가 들어가며, __SHELL__.loadSource 로 Vue 마이페이지 빌드 정보에
+  // remote/bundle 표기(§7 판정 수단)된다. 판정 전 기본값은 'bundle'.
+  String? _loadSourceState;
+  String get _loadSource => kReleaseMode ? (_loadSourceState ?? 'bundle') : 'dev';
+
+  // 원격 → 번들 폴백이 이번 기동에서 이미 수행됐는지(중복 폴백·플래핑 방지, §7 R-5).
+  // 재판정은 앱 재기동 시에만 한다(D4).
+  bool _remoteFallbackDone = false;
+
+  // 원격 첫 로드 감시 타이머(_kRemoteLoadWatchdog). onLoadStop 에서 해제된다.
+  Timer? _remoteWatchdog;
 
   DateTime? _lastBackPressedAt; // ✅ 추가
 
@@ -99,6 +152,14 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _ensureRuntimePermissions();
+
+    // __SHELL__ 주입용 앱 버전 취득(T1). 실패해도 빈 문자열로 주입되며 기능 영향 없음.
+    // ignore: discarded_futures
+    PackageInfo.fromPlatform().then((pkg) {
+      _appVersion = pkg.version;
+    }).catchError((e) {
+      debugPrint('[__SHELL__] 앱버전 취득 실패: $e');
+    });
 
     // release 빌드: 번들된 Vue 자산을 InAppLocalhostServer 로 서빙
     if (kReleaseMode) {
@@ -163,6 +224,7 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     _localhost?.close();
     _tokenRefreshSub?.cancel(); // prafta-com-008-F02: FCM refresh 구독 해제
     _msgOpenedSub?.cancel(); // PRAFTA-WEB_001-5: 푸시 탭(open) 구독 해제
+    _remoteWatchdog?.cancel(); // T4: 원격 첫 로드 감시 타이머 해제
     super.dispose();
   }
 
@@ -184,6 +246,9 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
       // 오래 백그라운드에 있다 복귀하면 로컬 서버 소켓이 회수돼 있을 수 있다(_ensureLocalhostAlive 주석).
       // ★재기동이 실제로 일어났을 때만 리로드한다. resume 마다 무조건 리로드하면
       //   작성 중이던 신청서·필터 등 Vue 상태가 통째로 날아간다.
+      // T4/D4: 원격 소스로 떠 있는 동안에는 로컬 서버 상태가 화면과 무관하므로
+      //   복구·리로드를 걸지 않는다(사용 중 소스 전환 금지). 재판정은 앱 재기동 시에만.
+      if (_loadSourceState == 'remote') return;
       // ignore: discarded_futures
       _ensureLocalhostAlive().then((recovered) {
         if (!recovered || !mounted) return;
@@ -673,18 +738,21 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     useOnDownloadStart: true,
     useShouldOverrideUrlLoading: true,
     javaScriptCanOpenWindowsAutomatically: true,
-    mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+    // T7 축소: 원격(https)·번들(http://localhost) 모두 혼합 콘텐츠 서브리소스가 없어 차단이 기본.
+    mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
     builtInZoomControls: false,
     supportZoom: false,
     allowsInlineMediaPlayback: true,
 
-    // 디버깅: chrome://inspect
-    isInspectable: true,
+    // 디버깅(T7 축소): 릴리즈는 WEBVIEW_DEBUG 빌드에서만 검사 허용(iOS Safari Inspector.
+    // 안드 chrome://inspect 는 main.dart 의 setWebContentsDebuggingEnabled 가 담당).
+    isInspectable: kDebugMode || _kWebviewDebug,
 
-    // 파일 접근
-    allowFileAccessFromFileURLs: true,
-    allowUniversalAccessFromFileURLs: true,
-    allowFileAccess: true,
+    // 파일 접근(T7 축소): 콘텐츠 오리진이 항상 http(s)라 file:// 접근 경로 자체가 없다.
+    // 사진 첨부는 네이티브 파일 선택기 경유라 무관 — §7 R-9 실기기 시험으로 확인.
+    allowFileAccessFromFileURLs: false,
+    allowUniversalAccessFromFileURLs: false,
+    allowFileAccess: false,
 
     // WebRTC/iframe 힌트
     iframeAllow: "camera; microphone",
@@ -710,32 +778,148 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     }
   }
 
+  /// __SHELL__ 주입 JS (T1). Vue 측 shellCapability.js 계약:
+  ///   { bridgeVersion, platform, appVersion, handlers[], loadSource }
+  /// handlers 는 addJavaScriptHandler 등록 목록(_kBridgeHandlers)과 항상 일치해야 한다.
+  /// jsonEncode 결과는 유효한 JS 객체 리터럴이므로 그대로 대입한다.
+  String _shellInfoJS() {
+    final info = <String, dynamic>{
+      'bridgeVersion': _kBridgeVersion,
+      'platform': Platform.isIOS ? 'ios' : 'android',
+      'appVersion': _appVersion,
+      'handlers': _kBridgeHandlers,
+      'loadSource': _loadSource,
+    };
+    return 'window.__SHELL__ = ${jsonEncode(info)};';
+  }
+
   /// 운영 백엔드 절대 URL(_kAppBaseUrl)을 페이지의 JS 번들이 실행되기 "전"(document-start)에
   /// window.__APP_BASE_URL__ 로 주입한다. Vue 의 axios 인스턴스는 모듈 로드 시점에
   /// baseURL 을 고정하므로, onLoadStop(페이지 로드 후) 주입은 이미 늦다.
   /// release APK 는 자산을 http://localhost 로 서빙해 상대경로(/prafta)가 번들 서버 자신을
   /// 가리키므로 이 절대 URL 주입이 백엔드 연결의 핵심이다.
-  /// APP_BASE_URL 미지정(dev 등)이면 빈 목록 → 주입 없음(vite 프록시 /prafta 그대로 사용).
+  /// APP_BASE_URL 미지정(dev 등)이면 그 항목만 생략(vite 프록시 /prafta 그대로 사용).
+  /// __SHELL__(T1) 은 dev/release 무관하게 항상 주입한다 — 능력 탐지는 양쪽 다 필요.
   UnmodifiableListView<UserScript> _initialUserScripts() {
-    if (_kAppBaseUrl.isEmpty) {
-      return UnmodifiableListView<UserScript>(const []);
-    }
-    return UnmodifiableListView<UserScript>([
+    final scripts = <UserScript>[
       UserScript(
-        source: "window.__APP_BASE_URL__ = ${jsStringLiteral(_kAppBaseUrl)};",
+        source: _shellInfoJS(),
         injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
       ),
-    ]);
+    ];
+    if (_kAppBaseUrl.isNotEmpty) {
+      scripts.add(
+        UserScript(
+          source: "window.__APP_BASE_URL__ = ${jsStringLiteral(_kAppBaseUrl)};",
+          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        ),
+      );
+    }
+    return UnmodifiableListView<UserScript>(scripts);
   }
 
-  /// release: InAppLocalhostServer (번들된 Vue 자산)
-  /// debug:   LAN dev 서버 (_kAppDevUrl)
+  /// 원격 매니페스트를 조회해 원격 진입 URL 을 판정한다(T4).
+  ///
+  /// 반환: 원격 진입 URL(원격 사용 가능) | null(번들 폴백 — D3).
+  /// null 이 되는 경우: 호스트 미설정 / 타임아웃(D2) / HTTP 비200 / JSON 파싱 실패
+  /// (캡티브 포털 N-4 방어) / enabled!=true(킬 스위치) / minShellBridgeVersion 초과(구셸 차단)
+  /// / entry 가 경로가 아님(S-2: 외부 도메인 지정 거부).
+  Future<String?> _decideRemoteEntry() async {
+    if (_kRemoteAppUrl.isEmpty) return null;
+    try {
+      return await _fetchRemoteEntry().timeout(_kManifestTimeout);
+    } on TimeoutException {
+      debugPrint('⏱️ 매니페스트 조회 타임아웃(${_kManifestTimeout.inSeconds}s) → 번들 폴백');
+      return null;
+    } catch (e) {
+      debugPrint('📄 매니페스트 조회 실패 → 번들 폴백: $e');
+      return null;
+    }
+  }
+
+  /// app-manifest.json 을 내려받아 엄격 검증한다. 실패는 예외로 던지고
+  /// 타임아웃/폴백 판정은 _decideRemoteEntry 가 담당한다.
+  Future<String?> _fetchRemoteEntry() async {
+    HttpClient? client;
+    try {
+      client = HttpClient()..connectionTimeout = _kManifestTimeout;
+      final req = await client.getUrl(
+        Uri.parse('$_kRemoteAppUrl/app-manifest.json'),
+      );
+      final res = await req.close();
+      if (res.statusCode != 200) {
+        debugPrint('📄 매니페스트 HTTP ${res.statusCode} → 번들 폴백');
+        return null;
+      }
+      final body = await res.transform(utf8.decoder).join();
+      // ★JSON 엄격 파싱(N-4): 캡티브 포털이 가로챈 HTML 은 여기서 반드시 실패해야 한다.
+      final data = jsonDecode(body);
+      if (data is! Map) {
+        debugPrint('📄 매니페스트 형식 오류(Map 아님) → 번들 폴백');
+        return null;
+      }
+      if (data['enabled'] != true) {
+        debugPrint('🔌 매니페스트 enabled!=true(킬 스위치) → 번들 폴백');
+        return null;
+      }
+      final minVer = data['minShellBridgeVersion'];
+      if (minVer is int && minVer > _kBridgeVersion) {
+        debugPrint('🔢 셸 브리지 v$_kBridgeVersion < 요구 v$minVer → 번들 폴백');
+        return null;
+      }
+      var entry = data['entry'];
+      if (entry is! String || entry.isEmpty) entry = '/';
+      if (!entry.startsWith('/')) {
+        // S-2: entry 는 우리 호스트 하위 경로만 허용. 절대 URL(외부 도메인) 거부.
+        debugPrint('🚫 매니페스트 entry 가 경로가 아님($entry) → 번들 폴백');
+        return null;
+      }
+      return '$_kRemoteAppUrl$entry';
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
+  /// 원격 로딩 실패 시 번들로 1회 폴백한다(중복 진입 가드). onReceivedError(메인 프레임)와
+  /// 원격 첫 로드 감시 타이머(_kRemoteLoadWatchdog) 양쪽에서 호출된다.
+  Future<void> _fallbackToBundle(String reason) async {
+    if (_loadSourceState != 'remote' || _remoteFallbackDone) return;
+    _remoteFallbackDone = true;
+    _remoteWatchdog?.cancel();
+    _loadSourceState = 'bundle';
+    debugPrint('🛟 원격 → 번들 폴백: $reason');
+    await _ensureLocalhostAlive(); // 이미 살아 있으면 no-op(재기동 없음)
+    await _ctl?.loadUrl(
+      urlRequest: URLRequest(url: WebUri('http://localhost:$_kLocalhostPort/')),
+    );
+  }
+
+  /// release: 원격 우선(매니페스트 판정) → 번들 폴백(InAppLocalhostServer, 현행 경로).
+  /// debug:   LAN dev 서버 (_kAppDevUrl) — 기존 그대로.
   Future<void> _openInitialUrl(InAppWebViewController ctl) async {
-    final url = kReleaseMode
-        ? 'http://localhost:$_kLocalhostPort/'
-        : _kAppDevUrl;
+    String url;
+    if (!kReleaseMode) {
+      url = _kAppDevUrl;
+    } else {
+      final remoteEntry = await _decideRemoteEntry();
+      if (remoteEntry != null) {
+        _loadSourceState = 'remote';
+        url = remoteEntry;
+        // N-1: 원격 진입 후 첫 로드가 시한 내에 끝나지 않으면 번들로 폴백.
+        _remoteWatchdog?.cancel();
+        _remoteWatchdog = Timer(_kRemoteLoadWatchdog, () {
+          if (!_pageLoaded) {
+            // ignore: discarded_futures
+            _fallbackToBundle('첫 로드 감시 시한(${_kRemoteLoadWatchdog.inSeconds}s) 초과');
+          }
+        });
+      } else {
+        _loadSourceState = 'bundle';
+        url = 'http://localhost:$_kLocalhostPort/';
+      }
+    }
     await ctl.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
-    debugPrint('🌐 Load initial URL -> $url (release=$kReleaseMode)');
+    debugPrint('🌐 Load initial URL -> $url (release=$kReleaseMode, source=$_loadSource)');
   }
 
   /// JS 콘솔 브릿지: 웹의 console.*을 Flutter 로그로 복제
@@ -920,6 +1104,10 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                   setState(() => _status = 'pageFinished: $url');
                   debugPrint('onLoadStop: $url');
 
+                  // T4: 원격 첫 로드 감시 해제(정상 도달).
+                  _remoteWatchdog?.cancel();
+                  _remoteWatchdog = null;
+
                   // PRAFTA-WEB_001-5: 페이지 로드 완료 표시 + 콜드스타트 보류 푸시 payload flush.
                   //   (window.__onPushOpened 는 Vue 가 App.vue onMounted 에서 등록 → 페이지 로드 후 호출)
                   _pageLoaded = true;
@@ -947,6 +1135,15 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                     } catch (e) {
                       debugPrint('❌ APP_BASE_URL inject failed: $e');
                     }
+                  }
+
+                  // __SHELL__ 재주입(보조, T1). document-start 시점에는 _appVersion 이
+                  // 아직 비어 있을 수 있어 취득 완료값으로 한 번 더 덮어쓴다.
+                  try {
+                    await controller.evaluateJavascript(source: _shellInfoJS());
+                    debugPrint('✅ __SHELL__ injected (v$_kBridgeVersion, $_loadSource)');
+                  } catch (e) {
+                    debugPrint('❌ __SHELL__ inject failed: $e');
                   }
 
                   try {
@@ -992,10 +1189,20 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                   );
                 },
 
+                // T4/S-3: 인증서 오류 무조건 PROCEED 폐지. 무효 인증서는 debug(LAN dev
+                // 서버 자가서명)에서만 허용하고, release 는 CANCEL → 메인 프레임 오류
+                // → onReceivedError 의 번들 폴백으로 이어진다. 정상 인증서는 이 콜백
+                // 자체가 오지 않으므로 release 원격/API 통신에는 영향이 없다.
                 onReceivedServerTrustAuthRequest: (controller, challenge) async {
                   debugPrint('onReceivedServerTrustAuthRequest: ${challenge.protectionSpace.host}');
+                  if (!kReleaseMode) {
+                    return ServerTrustAuthResponse(
+                      action: ServerTrustAuthResponseAction.PROCEED,
+                    );
+                  }
+                  debugPrint('🚫 release 무효 인증서 거부(S-3): ${challenge.protectionSpace.host}');
                   return ServerTrustAuthResponse(
-                    action: ServerTrustAuthResponseAction.PROCEED,
+                    action: ServerTrustAuthResponseAction.CANCEL,
                   );
                 },
 
@@ -1006,6 +1213,13 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                 onReceivedError: (controller, request, error) {
                   debugPrint('onReceivedError: ${error.type} ${error.description} for ${request.url}');
                   setState(() => _status = 'error: ${error.type} ${error.description}');
+
+                  // T4: 원격 소스의 메인 프레임 로드 실패(DNS 실패·연결 거부·인증서 CANCEL 등)
+                  // → 번들 폴백(L-3/L-5). 서브리소스 실패는 폴백 사유가 아니다.
+                  if (request.isForMainFrame == true && _loadSourceState == 'remote') {
+                    // ignore: discarded_futures
+                    _fallbackToBundle('메인 프레임 오류 ${error.type}');
+                  }
                 },
 
                 // iOS 전용: 메모리 압박으로 WKWebView 의 WebContent 프로세스가 죽으면
