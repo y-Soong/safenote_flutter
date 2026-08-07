@@ -16,7 +16,14 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+4
+#
+# ★ 버전명(1.0.x)은 iOS CFBundleShortVersionString = TestFlight "트레인" 이다.
+#   App Store 심사가 승인된 버전의 트레인은 닫히므로, 같은 값으로는 빌드번호를 올려도
+#   업로드가 거부된다(90062 / 90186 "train version is closed for new build submissions").
+#   codemagic.yaml 은 --build-number 만 주입하고 --build-name 은 주입하지 않으므로
+#   버전명의 단독 출처는 이 줄이다. 심사 승인된 버전을 다시 내보낼 때는 여기를 올릴 것.
+#   1.0.0 = 2026-08-07 iOS 심사 승인 / 1.0.1 = 반차 시간대 도입 (2026-08-08)
+version: 1.0.1+4
 
 environment:
   sdk: ^3.9.2
