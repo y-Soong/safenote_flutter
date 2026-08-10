@@ -30,6 +30,11 @@ const String _kAppBaseUrl = String.fromEnvironment(
 );
 const int _kLocalhostPort = 8080;
 
+// ★임시 진단(2026-08-10, iOS-푸시-미수신 작업지시서 문제 A): AppDelegate.swift 의
+// didFailToRegisterForRemoteNotificationsWithError 캡처값을 pull 로 조회한다. 원인 확정 후
+// 이 채널과 ios/Runner/AppDelegate.swift 쪽 대응 코드를 함께 제거할 것.
+const MethodChannel _apnsDiagChannel = MethodChannel('prafta/apns_diagnostics');
+
 class WebApp extends StatefulWidget {
   const WebApp({super.key});
   @override
@@ -497,6 +502,20 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
             ? 'APNs 토큰 확보(대기 ${waitedMs}ms)'
             : 'APNs 토큰 미확보(${waitedMs}ms 초과)';
         debugPrint('[GET_PUSH_TOKEN] $apnsWaitInfo');
+
+        // 미확보 시 네이티브 didFailToRegisterForRemoteNotificationsWithError 캡처값 조회.
+        if (apnsToken == null) {
+          try {
+            final nativeError = await _apnsDiagChannel.invokeMethod<String>(
+              'getLastRegistrationError',
+            );
+            apnsWaitInfo = nativeError != null
+                ? '$apnsWaitInfo\n네이티브 등록 실패: $nativeError'
+                : '$apnsWaitInfo\n(네이티브 실패 콜백도 없었음 — 등록 시도 자체가 무응답)';
+          } catch (e) {
+            debugPrint('[GET_PUSH_TOKEN] 네이티브 진단 채널 조회 실패: $e');
+          }
+        }
       }
 
       // 3) FCM 토큰 취득(권한 허용이어도 환경에 따라 null 가능).
