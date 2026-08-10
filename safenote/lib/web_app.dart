@@ -476,7 +476,30 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
         return {'pushToken': null, 'platform': platform, 'permission': 'denied'};
       }
 
-      // 2) FCM 토큰 취득(권한 허용이어도 환경에 따라 null 가능).
+      // 2) iOS: APNs 토큰이 네이티브에서 비동기로 늦게 도착한다(특히 최초 로그인 직후
+      //    requestPermission() 승인 직후에는 didRegisterForRemoteNotificationsWithDeviceToken
+      //    콜백이 아직 안 왔을 수 있음). 이 상태에서 getToken() 을 먼저 부르면
+      //    [firebase_messaging/apns-token-not-set] 예외가 난다(2026-08-10 TestFlight 실증 —
+      //    작업지시서 iOS-푸시-미수신 문제 A). getAPNSToken() 이 찰 때까지 폴링한 뒤에만 진행한다.
+      //    상한 12초 = JS 브리지 타임아웃(15초, 커밋 e2470835)보다 짧게 잡아 여유를 둔다.
+      String? apnsWaitInfo;
+      if (Platform.isIOS) {
+        const stepMs = 300;
+        const maxWaitMs = 12000;
+        var waitedMs = 0;
+        String? apnsToken = await messaging.getAPNSToken();
+        while (apnsToken == null && waitedMs < maxWaitMs) {
+          await Future.delayed(const Duration(milliseconds: stepMs));
+          waitedMs += stepMs;
+          apnsToken = await messaging.getAPNSToken();
+        }
+        apnsWaitInfo = apnsToken != null
+            ? 'APNs 토큰 확보(대기 ${waitedMs}ms)'
+            : 'APNs 토큰 미확보(${waitedMs}ms 초과)';
+        debugPrint('[GET_PUSH_TOKEN] $apnsWaitInfo');
+      }
+
+      // 3) FCM 토큰 취득(권한 허용이어도 환경에 따라 null 가능).
       String? token;
       Object? tokenError;
       try {
@@ -488,11 +511,15 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
 
       debugPrint('[GET_PUSH_TOKEN] granted=$granted hasToken=${token != null}');
       _showPushDiagnostic(
-        tokenError != null
-            ? '권한=허용, getToken() 예외:\n$tokenError'
-            : (token != null
-                ? '권한=허용, 토큰 취득 성공(len=${token.length})'
-                : '권한=허용, 토큰=null(예외 없음)'),
+        [
+          '권한=허용',
+          if (apnsWaitInfo != null) apnsWaitInfo,
+          tokenError != null
+              ? 'getToken() 예외:\n$tokenError'
+              : (token != null
+                  ? '토큰 취득 성공(len=${token.length})'
+                  : '토큰=null(예외 없음)'),
+        ].join('\n'),
       );
       return {'pushToken': token, 'platform': platform, 'permission': 'granted'};
     } catch (e) {
