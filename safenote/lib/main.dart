@@ -6,6 +6,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'location_gate.dart'; // 👈 위치권한 하드 게이트
 import 'camera_gate.dart'; // 👈 카메라권한 하드 게이트
 import 'firebase_options.dart'; // FlutterFire CLI 생성(iOS 전용 구성)
+import 'push_notifications.dart'; // 포그라운드 PUSH 표시 초기화(onMessage 구독은 web_app.dart)
 
 // 안드로이드 웹뷰 원격 디버깅(chrome://inspect) 토글.
 //
@@ -68,6 +69,14 @@ Future<void> main() async {
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
   } catch (e) {
     debugPrint('[FCM] Firebase 초기화 실패(앱 기동은 계속): $e');
+  }
+
+  // 작업지시서 iOS-푸시-미수신-및-포그라운드-알림-미표시 문제 B:
+  // 포그라운드 알림 채널/표시옵션 초기화. 실패해도 앱 기동은 막지 않는다.
+  try {
+    await initPushNotifications();
+  } catch (e) {
+    debugPrint('[FOREGROUND_PUSH] 초기화 실패(앱 기동은 계속): $e');
   }
 
   runApp(const MyApp());

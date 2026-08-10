@@ -14,6 +14,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:android_id/android_id.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'qr_scan_page.dart';
+import 'push_notifications.dart' show showForegroundNotification;
 
 // 개발 빌드는 LAN dev 서버, 운영 빌드는 InAppLocalhostServer 의 bundled assets 를 로딩한다.
 // 둘 다 --dart-define 으로 외부에서 덮어쓸 수 있다.
@@ -72,6 +73,10 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   StreamSubscription<RemoteMessage>? _msgOpenedSub;
   Map<String, dynamic>? _pendingPushData;
   bool _pageLoaded = false;
+
+  // 작업지시서 iOS-푸시-미수신-및-포그라운드-알림-미표시 문제 B:
+  // FirebaseMessaging.onMessage(포그라운드 수신) 구독. 표시 처리는 push_notifications.dart 위임.
+  StreamSubscription<RemoteMessage>? _foregroundMsgSub;
 
   /// 숨겨진 file input을 스캔해서 파일이 있으면 강제로 `input` 이벤트 발생
   /// (일부 안드 기기에서 change 이벤트가 누락되는 문제 대응)
@@ -163,6 +168,7 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     _localhost?.close();
     _tokenRefreshSub?.cancel(); // prafta-com-008-F02: FCM refresh 구독 해제
     _msgOpenedSub?.cancel(); // PRAFTA-WEB_001-5: 푸시 탭(open) 구독 해제
+    _foregroundMsgSub?.cancel(); // 포그라운드 PUSH 구독 해제
     super.dispose();
   }
 
@@ -466,24 +472,56 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
 
       if (!granted) {
         debugPrint('[GET_PUSH_TOKEN] 알림 권한 거부: ${settings.authorizationStatus}');
+        _showPushDiagnostic('권한 거부: ${settings.authorizationStatus}');
         return {'pushToken': null, 'platform': platform, 'permission': 'denied'};
       }
 
       // 2) FCM 토큰 취득(권한 허용이어도 환경에 따라 null 가능).
       String? token;
+      Object? tokenError;
       try {
         token = await messaging.getToken();
       } catch (e) {
+        tokenError = e;
         debugPrint('[GET_PUSH_TOKEN] getToken 실패: $e');
       }
 
       debugPrint('[GET_PUSH_TOKEN] granted=$granted hasToken=${token != null}');
+      _showPushDiagnostic(
+        tokenError != null
+            ? '권한=허용, getToken() 예외:\n$tokenError'
+            : (token != null
+                ? '권한=허용, 토큰 취득 성공(len=${token.length})'
+                : '권한=허용, 토큰=null(예외 없음)'),
+      );
       return {'pushToken': token, 'platform': platform, 'permission': 'granted'};
     } catch (e) {
       // Firebase 미초기화(google-services.json 미배치 등) 포함 모든 실패는 denied 로 graceful 처리.
       debugPrint('[GET_PUSH_TOKEN] 취득 실패: $e');
+      _showPushDiagnostic('전체 실패: $e');
       return {'pushToken': null, 'platform': platform, 'permission': 'denied'};
     }
+  }
+
+  // TODO(developer): iOS-푸시-미수신 작업지시서 문제 A 원인 확정 후 이 메서드와 호출부(4곳) 제거.
+  // ★임시 진단(2026-08-10): Mac 없이 실기기(TestFlight)에서 GET_PUSH_TOKEN 실패 지점을 눈으로
+  // 확인하기 위해 결과를 다이얼로그로 노출한다. release 빌드에서도 보이도록 kReleaseMode 로 막지
+  // 않았다 — 운영 배포에는 남기면 안 되는 진단 전용 코드다.
+  void _showPushDiagnostic(String message) {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('[진단] GET_PUSH_TOKEN 결과'),
+        content: SingleChildScrollView(child: Text(message)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('닫기'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// SCAN_QR 브리지 핸들러 (결함 1.3-3: 관리자 TBM 일용직 QR 입실).
@@ -637,6 +675,25 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     }).catchError((e) {
       debugPrint('[PUSH_OPENED] getInitialMessage 실패: $e');
     });
+  }
+
+  /// 작업지시서 iOS-푸시-미수신-및-포그라운드-알림-미표시 문제 B: 포그라운드 수신 구독.
+  ///
+  /// FirebaseMessaging.onMessage 를 구독하는 코드가 어디에도 없어 앱이 포그라운드일 때
+  /// PUSH 배너가 전혀 뜨지 않던 결함의 수정. 표시 처리(안드 로컬 알림 / iOS 배너 옵션)는
+  /// push_notifications.dart 에 위임한다(비즈니스 로직 금지 원칙 유지 — 여기서는 구독만).
+  /// 구독은 앱 1회만 설정(onWebViewCreated)하고 dispose 에서 해제한다.
+  void _subscribeForegroundMessages() {
+    _foregroundMsgSub?.cancel();
+    _foregroundMsgSub = FirebaseMessaging.onMessage.listen(
+      (message) {
+        debugPrint('[FOREGROUND_PUSH] onMessage 수신: ${message.messageId}');
+        showForegroundNotification(message);
+      },
+      onError: (e) {
+        debugPrint('[FOREGROUND_PUSH] 구독 오류: $e');
+      },
+    );
   }
 
   /// RemoteMessage.data(DATA_PAYLOAD)를 Vue 로 전달한다.
@@ -907,6 +964,9 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                   // 푸시 탭(open) 라우팅 (PRAFTA-WEB_001-5): onMessageOpenedApp/getInitialMessage
                   // -> window.__onPushOpened. 컨트롤러 확보 후 1회 구독(dispose 에서 해제).
                   _subscribeMessageOpened();
+
+                  // 포그라운드 PUSH 표시: onMessage 구독(문제 B). 컨트롤러 확보 후 1회 구독.
+                  _subscribeForegroundMessages();
 
                   await _openInitialUrl(controller);
                 },
