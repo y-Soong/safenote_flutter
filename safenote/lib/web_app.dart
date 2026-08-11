@@ -477,7 +477,6 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
 
       if (!granted) {
         debugPrint('[GET_PUSH_TOKEN] 알림 권한 거부: ${settings.authorizationStatus}');
-        _showPushDiagnostic('권한 거부: ${settings.authorizationStatus}');
         return {'pushToken': null, 'platform': platform, 'permission': 'denied'};
       }
 
@@ -487,7 +486,6 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
       //    [firebase_messaging/apns-token-not-set] 예외가 난다(2026-08-10 TestFlight 실증 —
       //    작업지시서 iOS-푸시-미수신 문제 A). getAPNSToken() 이 찰 때까지 폴링한 뒤에만 진행한다.
       //    상한 12초 = JS 브리지 타임아웃(15초, 커밋 e2470835)보다 짧게 잡아 여유를 둔다.
-      String? apnsWaitInfo;
       if (Platform.isIOS) {
         const stepMs = 300;
         const maxWaitMs = 12000;
@@ -498,20 +496,20 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
           waitedMs += stepMs;
           apnsToken = await messaging.getAPNSToken();
         }
-        apnsWaitInfo = apnsToken != null
-            ? 'APNs 토큰 확보(대기 ${waitedMs}ms)'
-            : 'APNs 토큰 미확보(${waitedMs}ms 초과)';
-        debugPrint('[GET_PUSH_TOKEN] $apnsWaitInfo');
+        debugPrint(apnsToken != null
+            ? '[GET_PUSH_TOKEN] APNs 토큰 확보(대기 ${waitedMs}ms)'
+            : '[GET_PUSH_TOKEN] APNs 토큰 미확보(${waitedMs}ms 초과)');
 
-        // 미확보 시 네이티브 didFailToRegisterForRemoteNotificationsWithError 캡처값 조회.
+        // 미확보 시 네이티브 didFailToRegisterForRemoteNotificationsWithError 캡처값을
+        // 로그로 남긴다(Xcode 콘솔 진단용 — iOS-푸시-미수신 작업지시서 문제 A 미해결 상태).
         if (apnsToken == null) {
           try {
             final nativeError = await _apnsDiagChannel.invokeMethod<String>(
               'getLastRegistrationError',
             );
-            apnsWaitInfo = nativeError != null
-                ? '$apnsWaitInfo\n네이티브 등록 실패: $nativeError'
-                : '$apnsWaitInfo\n(네이티브 실패 콜백도 없었음 — 등록 시도 자체가 무응답)';
+            debugPrint(nativeError != null
+                ? '[GET_PUSH_TOKEN] 네이티브 등록 실패: $nativeError'
+                : '[GET_PUSH_TOKEN] 네이티브 실패 콜백 없음 — 등록 시도 자체가 무응답');
           } catch (e) {
             debugPrint('[GET_PUSH_TOKEN] 네이티브 진단 채널 조회 실패: $e');
           }
@@ -520,54 +518,19 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
 
       // 3) FCM 토큰 취득(권한 허용이어도 환경에 따라 null 가능).
       String? token;
-      Object? tokenError;
       try {
         token = await messaging.getToken();
       } catch (e) {
-        tokenError = e;
         debugPrint('[GET_PUSH_TOKEN] getToken 실패: $e');
       }
 
       debugPrint('[GET_PUSH_TOKEN] granted=$granted hasToken=${token != null}');
-      _showPushDiagnostic(
-        [
-          '권한=허용',
-          if (apnsWaitInfo != null) apnsWaitInfo,
-          tokenError != null
-              ? 'getToken() 예외:\n$tokenError'
-              : (token != null
-                  ? '토큰 취득 성공(len=${token.length})'
-                  : '토큰=null(예외 없음)'),
-        ].join('\n'),
-      );
       return {'pushToken': token, 'platform': platform, 'permission': 'granted'};
     } catch (e) {
       // Firebase 미초기화(google-services.json 미배치 등) 포함 모든 실패는 denied 로 graceful 처리.
       debugPrint('[GET_PUSH_TOKEN] 취득 실패: $e');
-      _showPushDiagnostic('전체 실패: $e');
       return {'pushToken': null, 'platform': platform, 'permission': 'denied'};
     }
-  }
-
-  // TODO(developer): iOS-푸시-미수신 작업지시서 문제 A 원인 확정 후 이 메서드와 호출부(4곳) 제거.
-  // ★임시 진단(2026-08-10): Mac 없이 실기기(TestFlight)에서 GET_PUSH_TOKEN 실패 지점을 눈으로
-  // 확인하기 위해 결과를 다이얼로그로 노출한다. release 빌드에서도 보이도록 kReleaseMode 로 막지
-  // 않았다 — 운영 배포에는 남기면 안 되는 진단 전용 코드다.
-  void _showPushDiagnostic(String message) {
-    if (!mounted) return;
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('[진단] GET_PUSH_TOKEN 결과'),
-        content: SingleChildScrollView(child: Text(message)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('닫기'),
-          ),
-        ],
-      ),
-    );
   }
 
   /// SCAN_QR 브리지 핸들러 (결함 1.3-3: 관리자 TBM 일용직 QR 입실).
