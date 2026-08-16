@@ -943,10 +943,15 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   /// APP_BASE_URL 미지정(dev 등)이면 그 항목만 생략(vite 프록시 /prafta 그대로 사용).
   /// __SHELL__(T1) 은 dev/release 무관하게 항상 주입한다 — 능력 탐지는 양쪽 다 필요.
   UnmodifiableListView<UserScript> _initialUserScripts() {
+    // ★forMainFrameOnly: true — __SHELL__·__APP_BASE_URL__ 를 메인프레임에만 주입한다(H-1② 2차 방어).
+    //   제3자 iframe 에는 앱 내부 구조(__SHELL__ handlers 목록 등)를 노출하지 않는다.
+    //   1차 방어는 화이트리스트 밖 서브프레임 로드 차단(shouldOverrideUrlLoading)이며,
+    //   이 주입 제한은 그 방어가 뚫렸을 때의 심층 방어다. 정상 앱은 메인프레임 단일 origin 이라 무영향.
     final scripts = <UserScript>[
       UserScript(
         source: _shellInfoJS(),
         injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        forMainFrameOnly: true,
       ),
     ];
     if (_kAppBaseUrl.isNotEmpty) {
@@ -954,6 +959,7 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
         UserScript(
           source: "window.__APP_BASE_URL__ = ${jsStringLiteral(_kAppBaseUrl)};",
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+          forMainFrameOnly: true,
         ),
       );
     }
@@ -968,9 +974,11 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   /// / entry 가 경로가 아님(S-2: 외부 도메인 지정 거부).
   Future<String?> _decideRemoteEntry() async {
     if (_kRemoteAppUrl.isEmpty) return null;
-    // M-1(S-1): 원격 로딩은 https 만 허용(fail-closed). release 에서 http 원격 URL 로
+    // M-1(S-1): 원격 로딩은 https 만 허용(fail-closed). release/profile 에서 http 원격 URL 로
     //   빌드된 경우 원격 시도 자체를 포기하고 번들로 폴백한다(공급망 하한 보증).
-    if (kReleaseMode && !_kRemoteAppUrl.startsWith('https://')) {
+    //   ★!kDebugMode 로 맞춘다(종전 kReleaseMode) — 나머지 형상 게이트(로컬서버·dev·TLS)와 정합.
+    //     profile 도 release 와 같은 https 하한을 강제한다(profile 산출물 유출 대비).
+    if (!kDebugMode && !_kRemoteAppUrl.startsWith('https://')) {
       debugPrint('🔒 원격 URL 이 https 아님(M-1) → 번들 폴백');
       return null;
     }
@@ -1362,17 +1370,30 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                   // H-1①: 메인프레임 http(s) 내비게이션을 앱 origin 화이트리스트로 제한한다.
                   //   화이트리스트 밖(제3자 origin — 원격 XSS/피싱 링크 등)은 외부 브라우저로
                   //   위임하고 웹뷰 로드는 취소해, 네이티브 능력이 붙은 웹뷰에 제3자 페이지가
-                  //   뜨는 것을 막는다. 서브프레임(iframe)·비-http 스킴(tel:/mailto: 등)은
-                  //   검사 대상이 아니므로 종전대로 통과시킨다(회귀 방지).
-                  final isMainFrame = navAction.isForMainFrame == true;
+                  //   뜨는 것을 막는다. 비-http 스킴(tel:/mailto:/about:blank 등)은 검사 대상이
+                  //   아니므로 종전대로 통과시킨다(회귀 방지).
                   final scheme = url?.scheme.toLowerCase();
                   final isHttp = scheme == 'http' || scheme == 'https';
-                  if (isMainFrame && isHttp && !_isAllowedOrigin(url)) {
+                  if (!isHttp || _isAllowedOrigin(url)) {
+                    return NavigationActionPolicy.ALLOW;
+                  }
+                  // 화이트리스트 밖 http(s):
+                  final isMainFrame = navAction.isForMainFrame == true;
+                  if (isMainFrame) {
+                    // 메인프레임 → 외부 브라우저 위임 후 취소.
                     debugPrint('🚫 화이트리스트 밖 메인프레임 내비 차단(H-1) → 외부 위임: $url');
                     await _launchExternal(url);
                     return NavigationActionPolicy.CANCEL;
                   }
-                  return NavigationActionPolicy.ALLOW;
+                  // ★H-1② 보강: 화이트리스트 밖 제3자 서브프레임(iframe) 문서 로드는 그냥 취소한다.
+                  //   addJavaScriptHandler 는 프레임 단위 제한이 없어 브리지(GET_GPS/GET_PUSH_TOKEN 등)가
+                  //   전 프레임에 주입되고, callHandler 콜백은 발신 프레임 origin 을 주지 않는다
+                  //   (getUrl() 은 메인프레임 origin 을 돌려줘 iframe 발신을 못 거른다). 그래서
+                  //   origin 단위 방어만으로는 iframe 우회를 못 막는다 — 제3자 iframe 문서가 아예
+                  //   뜨지 못하게 로드를 차단하는 것이 확실한 봉쇄다(security 재검토 Medium).
+                  //   외부 위임은 하지 않는다(사용자가 누른 내비가 아니라 페이지가 임베드한 것).
+                  debugPrint('🚫 화이트리스트 밖 서브프레임 로드 차단(H-1②): $url');
+                  return NavigationActionPolicy.CANCEL;
                 },
 
                 // useOnDownloadStart 안전망: shouldOverrideUrlLoading 으로 못 잡은
