@@ -171,8 +171,12 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
       debugPrint('[__SHELL__] 앱버전 취득 실패: $e');
     });
 
-    // release 빌드: 번들된 Vue 자산을 InAppLocalhostServer 로 서빙
-    if (kReleaseMode) {
+    // debug 외(release·profile): 번들된 Vue 자산을 InAppLocalhostServer 로 서빙.
+    //   ★!kDebugMode 로 맞춘다(종전 kReleaseMode). TLS·dev URL 판정을 kDebugMode 로 좁힌 뒤
+    //     이 게이트만 kReleaseMode 로 남으면 profile 빌드에서 dev URL 도 안 타고 로컬 서버도 안 떠,
+    //     원격 실패 시 localhost:8080 번들 폴백이 서버 부재로 흰 화면이 된다.
+    //     세 게이트(로컬서버·dev URL·TLS)의 "release 형상" 기준을 kDebugMode 로 통일한다.
+    if (!kDebugMode) {
       _localhost = InAppLocalhostServer(
         port: _kLocalhostPort,
         documentRoot: 'assets/vue_app/',
@@ -314,7 +318,9 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   /// 이미 렌더된 DOM 과 로드된 JS 는 살아 있어 스크롤은 정상이라, 겉보기에는
   /// "버튼만 안 눌리는" 것처럼 보인다. 앱을 껐다 켜면 initState 가 다시 돌아 정상화된다.
   Future<bool> _ensureLocalhostAlive() async {
-    if (!kReleaseMode || _recoveringLocalhost) return false;
+    // ★로컬 서버를 띄우는 형상(!kDebugMode)에서만 복구한다 — initState 기동 게이트와 동일 기준.
+    //   kReleaseMode 로 두면 profile 에서 서버는 떴는데 복구는 안 돌아 소켓 회수 후 흰 화면이 된다.
+    if (kDebugMode || _recoveringLocalhost) return false;
     _recoveringLocalhost = true;
     try {
       if (await _probeLocalhost()) return false;
