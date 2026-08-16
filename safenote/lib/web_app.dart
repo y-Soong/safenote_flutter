@@ -14,6 +14,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:android_id/android_id.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'qr_scan_page.dart';
+import 'push_notifications.dart' show showForegroundNotification;
 
 // 개발 빌드는 LAN dev 서버, 운영 빌드는 InAppLocalhostServer 의 bundled assets 를 로딩한다.
 // 둘 다 --dart-define 으로 외부에서 덮어쓸 수 있다.
@@ -64,6 +65,11 @@ const Duration _kManifestTimeout = Duration(seconds: 3);
 // 원격 진입 후 첫 페이지 로드 감시 시한 — 이 안에 onLoadStop 이 오지 않으면 번들 폴백
 // (§7 N-1 "흰 화면 방치 금지"). 저속망 오탐을 피하려 여유 있게 잡는다.
 const Duration _kRemoteLoadWatchdog = Duration(seconds: 12);
+
+// ★임시 진단(2026-08-10, iOS-푸시-미수신 작업지시서 문제 A): AppDelegate.swift 의
+// didFailToRegisterForRemoteNotificationsWithError 캡처값을 pull 로 조회한다. 원인 확정 후
+// 이 채널과 ios/Runner/AppDelegate.swift 쪽 대응 코드를 함께 제거할 것.
+const MethodChannel _apnsDiagChannel = MethodChannel('prafta/apns_diagnostics');
 
 class WebApp extends StatefulWidget {
   const WebApp({super.key});
@@ -125,6 +131,10 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   StreamSubscription<RemoteMessage>? _msgOpenedSub;
   Map<String, dynamic>? _pendingPushData;
   bool _pageLoaded = false;
+
+  // 작업지시서 iOS-푸시-미수신-및-포그라운드-알림-미표시 문제 B:
+  // FirebaseMessaging.onMessage(포그라운드 수신) 구독. 표시 처리는 push_notifications.dart 위임.
+  StreamSubscription<RemoteMessage>? _foregroundMsgSub;
 
   /// 숨겨진 file input을 스캔해서 파일이 있으면 강제로 `input` 이벤트 발생
   /// (일부 안드 기기에서 change 이벤트가 누락되는 문제 대응)
@@ -225,6 +235,7 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     _tokenRefreshSub?.cancel(); // prafta-com-008-F02: FCM refresh 구독 해제
     _msgOpenedSub?.cancel(); // PRAFTA-WEB_001-5: 푸시 탭(open) 구독 해제
     _remoteWatchdog?.cancel(); // T4: 원격 첫 로드 감시 타이머 해제
+    _foregroundMsgSub?.cancel(); // 포그라운드 PUSH 구독 해제
     super.dispose();
   }
 
@@ -534,7 +545,43 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
         return {'pushToken': null, 'platform': platform, 'permission': 'denied'};
       }
 
-      // 2) FCM 토큰 취득(권한 허용이어도 환경에 따라 null 가능).
+      // 2) iOS: APNs 토큰이 네이티브에서 비동기로 늦게 도착한다(특히 최초 로그인 직후
+      //    requestPermission() 승인 직후에는 didRegisterForRemoteNotificationsWithDeviceToken
+      //    콜백이 아직 안 왔을 수 있음). 이 상태에서 getToken() 을 먼저 부르면
+      //    [firebase_messaging/apns-token-not-set] 예외가 난다(2026-08-10 TestFlight 실증 —
+      //    작업지시서 iOS-푸시-미수신 문제 A). getAPNSToken() 이 찰 때까지 폴링한 뒤에만 진행한다.
+      //    상한 12초 = JS 브리지 타임아웃(15초, 커밋 e2470835)보다 짧게 잡아 여유를 둔다.
+      if (Platform.isIOS) {
+        const stepMs = 300;
+        const maxWaitMs = 12000;
+        var waitedMs = 0;
+        String? apnsToken = await messaging.getAPNSToken();
+        while (apnsToken == null && waitedMs < maxWaitMs) {
+          await Future.delayed(const Duration(milliseconds: stepMs));
+          waitedMs += stepMs;
+          apnsToken = await messaging.getAPNSToken();
+        }
+        debugPrint(apnsToken != null
+            ? '[GET_PUSH_TOKEN] APNs 토큰 확보(대기 ${waitedMs}ms)'
+            : '[GET_PUSH_TOKEN] APNs 토큰 미확보(${waitedMs}ms 초과)');
+
+        // 미확보 시 네이티브 didFailToRegisterForRemoteNotificationsWithError 캡처값을
+        // 로그로 남긴다(Xcode 콘솔 진단용 — iOS-푸시-미수신 작업지시서 문제 A 미해결 상태).
+        if (apnsToken == null) {
+          try {
+            final nativeError = await _apnsDiagChannel.invokeMethod<String>(
+              'getLastRegistrationError',
+            );
+            debugPrint(nativeError != null
+                ? '[GET_PUSH_TOKEN] 네이티브 등록 실패: $nativeError'
+                : '[GET_PUSH_TOKEN] 네이티브 실패 콜백 없음 — 등록 시도 자체가 무응답');
+          } catch (e) {
+            debugPrint('[GET_PUSH_TOKEN] 네이티브 진단 채널 조회 실패: $e');
+          }
+        }
+      }
+
+      // 3) FCM 토큰 취득(권한 허용이어도 환경에 따라 null 가능).
       String? token;
       try {
         token = await messaging.getToken();
@@ -702,6 +749,25 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     }).catchError((e) {
       debugPrint('[PUSH_OPENED] getInitialMessage 실패: $e');
     });
+  }
+
+  /// 작업지시서 iOS-푸시-미수신-및-포그라운드-알림-미표시 문제 B: 포그라운드 수신 구독.
+  ///
+  /// FirebaseMessaging.onMessage 를 구독하는 코드가 어디에도 없어 앱이 포그라운드일 때
+  /// PUSH 배너가 전혀 뜨지 않던 결함의 수정. 표시 처리(안드 로컬 알림 / iOS 배너 옵션)는
+  /// push_notifications.dart 에 위임한다(비즈니스 로직 금지 원칙 유지 — 여기서는 구독만).
+  /// 구독은 앱 1회만 설정(onWebViewCreated)하고 dispose 에서 해제한다.
+  void _subscribeForegroundMessages() {
+    _foregroundMsgSub?.cancel();
+    _foregroundMsgSub = FirebaseMessaging.onMessage.listen(
+      (message) {
+        debugPrint('[FOREGROUND_PUSH] onMessage 수신: ${message.messageId}');
+        showForegroundNotification(message);
+      },
+      onError: (e) {
+        debugPrint('[FOREGROUND_PUSH] 구독 오류: $e');
+      },
+    );
   }
 
   /// RemoteMessage.data(DATA_PAYLOAD)를 Vue 로 전달한다.
@@ -1091,6 +1157,9 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                   // 푸시 탭(open) 라우팅 (PRAFTA-WEB_001-5): onMessageOpenedApp/getInitialMessage
                   // -> window.__onPushOpened. 컨트롤러 확보 후 1회 구독(dispose 에서 해제).
                   _subscribeMessageOpened();
+
+                  // 포그라운드 PUSH 표시: onMessage 구독(문제 B). 컨트롤러 확보 후 1회 구독.
+                  _subscribeForegroundMessages();
 
                   await _openInitialUrl(controller);
                 },

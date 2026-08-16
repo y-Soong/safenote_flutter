@@ -11,6 +11,9 @@
     <!-- ✅ 위치 권한: 출퇴근/TBM 지오펜스 판정용 GPS 취득(앱 실행 시 하드 게이트) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- Android 13+ 알림 표시 런타임 권한(FirebaseMessaging.requestPermission 이 요청).
+         선언 누락 시 포그라운드 로컬 알림(push_notifications.dart)이 조용히 무시된다. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- MODIFY_AUDIO_SETTINGS 는 보통 불필요 -->
     <!-- <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/> -->
 
@@ -74,5 +77,13 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- 문제 B: 백그라운드/종료 상태에서 FCM 이 자동 표시하는 알림도 포그라운드 로컬 알림과
+             동일한 채널(high_importance_channel, push_notifications.dart)을 쓰도록 고정한다.
+             미지정 시 OS 기본 채널("Miscellaneous", 낮은 importance)과 이원화되어
+             상태에 따라 알림 중요도/사운드가 달라진다. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="high_importance_channel" />
     </application>
 </manifest>
