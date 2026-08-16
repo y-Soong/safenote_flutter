@@ -1,7 +1,7 @@
 import 'dart:async' show StreamSubscription, TimeoutException, Timer;
 import 'dart:collection' show UnmodifiableListView;
 import 'dart:convert' show jsonEncode, jsonDecode, utf8;
-import 'dart:io' show HttpClient, Platform;
+import 'dart:io' show HttpClient, HttpHeaders, Platform;
 import 'package:flutter/foundation.dart' show kDebugMode, kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -390,6 +390,8 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   ///
   /// 비즈니스 로직(지오펜스/저장)은 백엔드 몫이며 여기서는 좌표 취득만 한다.
   Future<Map<String, dynamic>> _handleGetGps() async {
+    // H-1② 심층 방어: 화이트리스트 밖 origin 이면 좌표 제공 없이 종전 실패 형태로 거부.
+    if (await _bridgeOriginBlocked('GET_GPS')) return {'status': 'TIMEOUT'};
     try {
       // 1) OS 위치 서비스 ON 여부.
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -452,6 +454,16 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   ///   - iOS:     deviceId = identifierForVendor(IDFV),     deviceType = 'IOS'
   ///   - 취득 실패 시 deviceId = null (앱FE 가 localStorage UUID 로 graceful 폴백).
   Future<Map<String, dynamic>> _handleGetDeviceInfo() async {
+    // H-1② 심층 방어: 화이트리스트 밖 origin 이면 식별자 미제공(앱FE 가 localStorage UUID 폴백).
+    if (await _bridgeOriginBlocked('GET_DEVICE_INFO')) {
+      return {
+        'deviceId': null,
+        'deviceType': 'UNKNOWN',
+        'model': null,
+        'osVersion': null,
+        'appVersion': null,
+      };
+    }
     final deviceInfo = DeviceInfoPlugin();
     String? deviceId;
     String deviceType = 'UNKNOWN';
@@ -531,6 +543,10 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   ///   - 권한 허용이나 토큰 미발급/취득 실패 → permission='granted', pushToken=null
   Future<Map<String, dynamic>> _handleGetPushToken() async {
     const String platform = 'android';
+    // H-1② 심층 방어: 화이트리스트 밖 origin 이면 토큰 미발급(종전 denied 실패 형태).
+    if (await _bridgeOriginBlocked('GET_PUSH_TOKEN')) {
+      return {'pushToken': null, 'platform': platform, 'permission': 'denied'};
+    }
     try {
       final messaging = FirebaseMessaging.instance;
 
@@ -610,6 +626,8 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   ///   - 권한거부:   {status:'PERMISSION_DENIED'}
   ///   - 예외:      {status:'ERROR'}
   Future<Map<String, dynamic>> _handleScanQr() async {
+    // H-1② 심층 방어: 화이트리스트 밖 origin 이면 스캐너를 열지 않고 종전 실패 형태로 거부.
+    if (await _bridgeOriginBlocked('SCAN_QR')) return {'status': 'ERROR'};
     try {
       // 1) 카메라 권한 확인/요청(거부 시 PERMISSION_DENIED).
       var status = await Permission.camera.status;
@@ -825,6 +843,58 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
     iframeAllowFullscreen: true,
   );
 
+  // H-1(원격 전환 차단): 앱 origin 화이트리스트(기동 시 1회 계산). 여기에 속한 origin 에서만
+  //   메인프레임 내비게이션·민감 브리지·미디어 권한을 허용한다. 상수 기반이라 1회 계산으로 충분.
+  //   - 원격: _kRemoteAppUrl(운영 app.prafta.com)
+  //   - 번들: http://localhost:_kLocalhostPort(release 로컬 서버, 8080)
+  //   - dev : _kAppDevUrl(LAN dev 서버) — debug 빌드에서만 포함(L-4 와 동일 기준)
+  late final Set<String> _allowedOriginSet = _computeAllowedOrigins();
+
+  Set<String> _computeAllowedOrigins() {
+    final set = <String>{};
+    void add(String raw) {
+      final o = _normalizeOrigin(Uri.tryParse(raw));
+      if (o != null) set.add(o);
+    }
+    add(_kRemoteAppUrl); // 원격 호스트
+    add('http://localhost:$_kLocalhostPort'); // 번들 로컬 서버
+    if (kDebugMode) add(_kAppDevUrl); // debug LAN dev 서버(profile/release 제외)
+    return set;
+  }
+
+  /// URI 를 'scheme://host:port'(기본포트까지 해소) origin 문자열로 정규화한다.
+  /// http(s) 가 아니거나 host 가 없으면 null(= 화이트리스트 대상 아님).
+  String? _normalizeOrigin(Uri? uri) {
+    if (uri == null) return null;
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme != 'http' && scheme != 'https') return null;
+    if (uri.host.isEmpty) return null;
+    return '$scheme://${uri.host}:${uri.port}';
+  }
+
+  /// origin 이 앱 화이트리스트에 속하는지(H-1 공유 판정). 정상 앱 origin 에서만 true.
+  bool _isAllowedOrigin(Uri? uri) {
+    final o = _normalizeOrigin(uri);
+    return o != null && _allowedOriginSet.contains(o);
+  }
+
+  /// 민감 브리지(GET_GPS/GET_PUSH_TOKEN/GET_DEVICE_INFO/SCAN_QR) 심층 방어(H-1②).
+  /// 현재 웹뷰 origin 이 화이트리스트가 아니면 true(=거부해야 함). 정상 앱 origin 에선 항상
+  /// false 라 종전 동작과 100% 동일하다. origin 조회 자체가 실패하면 기능을 죽이지 않도록
+  /// 허용측(false)으로 둔다 — 1차 방어(내비 화이트리스트·권한 DENY)가 제3자 페이지의 진입을
+  /// 이미 차단하므로 이 재검증은 심층 방어다.
+  Future<bool> _bridgeOriginBlocked(String tag) async {
+    try {
+      final current = await _ctl?.getUrl();
+      if (_isAllowedOrigin(current)) return false;
+      debugPrint('🚫 [$tag] 화이트리스트 밖 origin 브리지 호출 거부(H-1): $current');
+      return true;
+    } catch (e) {
+      debugPrint('[$tag] origin 확인 실패(허용 처리): $e');
+      return false;
+    }
+  }
+
   /// 첨부 다운로드 스트림 URL 판별(경로가 '/file-download' 로 끝남). 토큰 발급 EP
   /// ('/file-download-token')는 axios(JSON)로 처리되어 네비게이션이 아니므로 제외된다.
   bool _isDownloadUrl(WebUri? url) {
@@ -892,6 +962,12 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   /// / entry 가 경로가 아님(S-2: 외부 도메인 지정 거부).
   Future<String?> _decideRemoteEntry() async {
     if (_kRemoteAppUrl.isEmpty) return null;
+    // M-1(S-1): 원격 로딩은 https 만 허용(fail-closed). release 에서 http 원격 URL 로
+    //   빌드된 경우 원격 시도 자체를 포기하고 번들로 폴백한다(공급망 하한 보증).
+    if (kReleaseMode && !_kRemoteAppUrl.startsWith('https://')) {
+      debugPrint('🔒 원격 URL 이 https 아님(M-1) → 번들 폴백');
+      return null;
+    }
     try {
       return await _fetchRemoteEntry().timeout(_kManifestTimeout);
     } on TimeoutException {
@@ -912,12 +988,36 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
       final req = await client.getUrl(
         Uri.parse('$_kRemoteAppUrl/app-manifest.json'),
       );
+      // L-3: 킬스위치가 캐시된 구 매니페스트에 가리지 않도록 no-cache 강제(이중 보강).
+      req.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
       final res = await req.close();
       if (res.statusCode != 200) {
         debugPrint('📄 매니페스트 HTTP ${res.statusCode} → 번들 폴백');
         return null;
       }
-      final body = await res.transform(utf8.decoder).join();
+      // L-2: Content-Type 이 json 계열이 아니면 폴백(캡티브 포털/오류 HTML 조기 차단).
+      final contentType = res.headers.contentType;
+      if (contentType == null ||
+          !contentType.mimeType.toLowerCase().contains('json')) {
+        debugPrint('📄 매니페스트 Content-Type 비-json($contentType) → 번들 폴백');
+        return null;
+      }
+      // L-1: 응답 본문 크기 상한(64KB). contentLength 선검사 + 누적 길이 이중 검사
+      //   (contentLength 미제공/-1 이어도 스트리밍 누적으로 상한을 강제).
+      const maxBytes = 64 * 1024;
+      if (res.contentLength > maxBytes) {
+        debugPrint('📄 매니페스트 과대(contentLength=${res.contentLength}) → 번들 폴백');
+        return null;
+      }
+      final bytes = <int>[];
+      await for (final chunk in res) {
+        bytes.addAll(chunk);
+        if (bytes.length > maxBytes) {
+          debugPrint('📄 매니페스트 본문 상한(${maxBytes}B) 초과 → 번들 폴백');
+          return null;
+        }
+      }
+      final body = utf8.decode(bytes);
       // ★JSON 엄격 파싱(N-4): 캡티브 포털이 가로챈 HTML 은 여기서 반드시 실패해야 한다.
       final data = jsonDecode(body);
       if (data is! Map) {
@@ -928,8 +1028,16 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
         debugPrint('🔌 매니페스트 enabled!=true(킬 스위치) → 번들 폴백');
         return null;
       }
-      final minVer = data['minShellBridgeVersion'];
-      if (minVer is int && minVer > _kBridgeVersion) {
+      // minShellBridgeVersion 타입 관용(qa 정보성): "3"(문자열)·3.0(double)·3 모두 int 로
+      //   관용 파싱한다. 자사 통제 자산이라 방어는 최소로만.
+      final rawMinVer = data['minShellBridgeVersion'];
+      int? minVer;
+      if (rawMinVer is num) {
+        minVer = rawMinVer.toInt();
+      } else if (rawMinVer is String) {
+        minVer = int.tryParse(rawMinVer.trim());
+      }
+      if (minVer != null && minVer > _kBridgeVersion) {
         debugPrint('🔢 셸 브리지 v$_kBridgeVersion < 요구 v$minVer → 번들 폴백');
         return null;
       }
@@ -964,13 +1072,18 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   /// debug:   LAN dev 서버 (_kAppDevUrl) — 기존 그대로.
   Future<void> _openInitialUrl(InAppWebViewController ctl) async {
     String url;
-    if (!kReleaseMode) {
+    // L-4: dev URL 자동 선택은 debug 빌드에만 한정한다. profile 은 release 측(원격/번들)에
+    //   붙어 LAN dev 서버 자동 접속·자가서명 우회가 살아나지 않도록 한다.
+    if (kDebugMode) {
       url = _kAppDevUrl;
     } else {
       final remoteEntry = await _decideRemoteEntry();
       if (remoteEntry != null) {
         _loadSourceState = 'remote';
         url = remoteEntry;
+        // qaL-2: 매니페스트 조회 중 about:blank 등 선행 onLoadStop 의 _pageLoaded=true 가
+        //   워치독 판정(!_pageLoaded)을 무력화하지 않도록, 원격 첫 로드 감시 직전 리셋한다.
+        _pageLoaded = false;
         // N-1: 원격 진입 후 첫 로드가 시한 내에 끝나지 않으면 번들로 폴백.
         _remoteWatchdog?.cancel();
         _remoteWatchdog = Timer(_kRemoteLoadWatchdog, () {
@@ -1240,6 +1353,19 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                     await _launchExternal(url);
                     return NavigationActionPolicy.CANCEL;
                   }
+                  // H-1①: 메인프레임 http(s) 내비게이션을 앱 origin 화이트리스트로 제한한다.
+                  //   화이트리스트 밖(제3자 origin — 원격 XSS/피싱 링크 등)은 외부 브라우저로
+                  //   위임하고 웹뷰 로드는 취소해, 네이티브 능력이 붙은 웹뷰에 제3자 페이지가
+                  //   뜨는 것을 막는다. 서브프레임(iframe)·비-http 스킴(tel:/mailto: 등)은
+                  //   검사 대상이 아니므로 종전대로 통과시킨다(회귀 방지).
+                  final isMainFrame = navAction.isForMainFrame == true;
+                  final scheme = url?.scheme.toLowerCase();
+                  final isHttp = scheme == 'http' || scheme == 'https';
+                  if (isMainFrame && isHttp && !_isAllowedOrigin(url)) {
+                    debugPrint('🚫 화이트리스트 밖 메인프레임 내비 차단(H-1) → 외부 위임: $url');
+                    await _launchExternal(url);
+                    return NavigationActionPolicy.CANCEL;
+                  }
                   return NavigationActionPolicy.ALLOW;
                 },
 
@@ -1251,7 +1377,17 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                 },
 
                 onPermissionRequest: (controller, request) async {
-                  debugPrint('onPermissionRequest: ${request.resources}');
+                  debugPrint('onPermissionRequest: ${request.resources} origin=${request.origin}');
+                  // H-1③/M-2: 앱 origin 화이트리스트에서 온 요청만 GRANT. iframe/제3자 origin
+                  //   (임베드·광고 등)의 camera/microphone 요청은 DENY 한다. 정상 앱 origin 에서는
+                  //   종전과 동일하게 요청 리소스를 GRANT 하므로 회귀가 없다.
+                  if (!_isAllowedOrigin(request.origin)) {
+                    debugPrint('🚫 화이트리스트 밖 origin 권한 요청 거부(H-1③/M-2): ${request.origin}');
+                    return PermissionResponse(
+                      resources: request.resources,
+                      action: PermissionResponseAction.DENY,
+                    );
+                  }
                   return PermissionResponse(
                     resources: request.resources,
                     action: PermissionResponseAction.GRANT,
@@ -1264,7 +1400,9 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                 // 자체가 오지 않으므로 release 원격/API 통신에는 영향이 없다.
                 onReceivedServerTrustAuthRequest: (controller, challenge) async {
                   debugPrint('onReceivedServerTrustAuthRequest: ${challenge.protectionSpace.host}');
-                  if (!kReleaseMode) {
+                  // L-4: 자가서명 PROCEED 는 debug 빌드에만 한정한다. !kReleaseMode 는 profile
+                  //   에서도 true 라 profile 산출물 유출 시 무효 인증서가 통과되므로 kDebugMode 로 좁힌다.
+                  if (kDebugMode) {
                     return ServerTrustAuthResponse(
                       action: ServerTrustAuthResponseAction.PROCEED,
                     );
@@ -1288,6 +1426,18 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                   if (request.isForMainFrame == true && _loadSourceState == 'remote') {
                     // ignore: discarded_futures
                     _fallbackToBundle('메인 프레임 오류 ${error.type}');
+                  }
+                },
+
+                // qaM-1: 원격 메인 페이지가 4xx/5xx(예: entry 경로 404, CloudFront 오류 페이지)면
+                // onLoadStop 이 "정상 로드"로 워치독을 해제해 오류 페이지에 영구 고정되므로,
+                // 메인프레임 + 원격 모드일 때만 번들로 폴백한다. 서브리소스 HTTP 오류(이미지 404 등)로
+                // 전체가 튕기지 않도록 가드 조건은 onReceivedError(메인프레임 폴백)와 동일하게 둔다.
+                onReceivedHttpError: (controller, request, errorResponse) {
+                  debugPrint('onReceivedHttpError: ${errorResponse.statusCode} for ${request.url}');
+                  if (request.isForMainFrame == true && _loadSourceState == 'remote') {
+                    // ignore: discarded_futures
+                    _fallbackToBundle('메인 프레임 HTTP ${errorResponse.statusCode}');
                   }
                 },
 
