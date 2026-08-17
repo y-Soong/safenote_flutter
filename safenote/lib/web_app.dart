@@ -15,6 +15,7 @@ import 'package:android_id/android_id.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'qr_scan_page.dart';
 import 'push_notifications.dart' show showForegroundNotification;
+import 'server_trust_policy.dart' show shouldProceedServerTrust;
 
 // 개발 빌드는 LAN dev 서버, 운영 빌드는 InAppLocalhostServer 의 bundled assets 를 로딩한다.
 // 둘 다 --dart-define 으로 외부에서 덮어쓸 수 있다.
@@ -1430,31 +1431,24 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                 //   웹뷰 발 전체 API(https)를 TLS 단계에서 전멸시켰다(서버 접근로그 요청 0건).
                 //   → 오류 없는 정상 신뢰(sslError 부재)는 PROCEED 로 통과시킨다.
                 onReceivedServerTrustAuthRequest: (controller, challenge) async {
-                  final sslError = challenge.protectionSpace.sslError;
-                  final sslErrorCode = sslError?.code;
+                  // ★판정은 shouldProceedServerTrust(server_trust_policy.dart) 단일 출처.
+                  //   iOS 함정 2종(상시 챌린지·UNSPECIFIED=정상)의 상세와 회귀 테스트가 그쪽에 있다.
+                  //   여기서 인라인 판정으로 되돌리지 말 것(TestFlight 130~132 전면 장애 재발 지점).
+                  final sslErrorCode = challenge.protectionSpace.sslError?.code;
+                  final proceed = shouldProceedServerTrust(
+                    sslErrorCode: sslErrorCode,
+                    isDebugBuild: kDebugMode,
+                  );
                   debugPrint(
-                      'onReceivedServerTrustAuthRequest: ${challenge.protectionSpace.host} sslError=$sslErrorCode');
-                  // 정상 인증서 → 통과. iOS 의 상시 챌린지가 API 를 죽이지 않게 한다.
-                  // ★iOS 함정 2(TestFlight 132 실증): 유효한 인증서도 SecTrustEvaluate 가
-                  //   proceed 가 아닌 unspecified(평가 성공·암묵 신뢰)를 돌려줘, 플러그인이
-                  //   sslError(code=UNSPECIFIED)를 실어 보낸다. UNSPECIFIED 는 안드로이드
-                  //   매핑에 존재하지 않는 iOS 전용 "정상" 값이므로 신뢰로 취급한다.
-                  if (sslErrorCode == null ||
-                      sslErrorCode == SslErrorType.UNSPECIFIED) {
-                    return ServerTrustAuthResponse(
-                      action: ServerTrustAuthResponseAction.PROCEED,
-                    );
+                      'onReceivedServerTrustAuthRequest: ${challenge.protectionSpace.host} sslError=$sslErrorCode proceed=$proceed');
+                  if (!proceed) {
+                    // L-4: 자가서명(무효 인증서)은 debug 만 통과 — release/profile 거부(S-3).
+                    debugPrint('🚫 release 무효 인증서 거부(S-3): ${challenge.protectionSpace.host}');
                   }
-                  // L-4: 자가서명(무효 인증서) PROCEED 는 debug 빌드에만 한정한다. !kReleaseMode 는 profile
-                  //   에서도 true 라 profile 산출물 유출 시 무효 인증서가 통과되므로 kDebugMode 로 좁힌다.
-                  if (kDebugMode) {
-                    return ServerTrustAuthResponse(
-                      action: ServerTrustAuthResponseAction.PROCEED,
-                    );
-                  }
-                  debugPrint('🚫 release 무효 인증서 거부(S-3): ${challenge.protectionSpace.host}');
                   return ServerTrustAuthResponse(
-                    action: ServerTrustAuthResponseAction.CANCEL,
+                    action: proceed
+                        ? ServerTrustAuthResponseAction.PROCEED
+                        : ServerTrustAuthResponseAction.CANCEL,
                   );
                 },
 
