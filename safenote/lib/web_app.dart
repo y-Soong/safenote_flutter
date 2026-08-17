@@ -1423,11 +1423,23 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
 
                 // T4/S-3: 인증서 오류 무조건 PROCEED 폐지. 무효 인증서는 debug(LAN dev
                 // 서버 자가서명)에서만 허용하고, release 는 CANCEL → 메인 프레임 오류
-                // → onReceivedError 의 번들 폴백으로 이어진다. 정상 인증서는 이 콜백
-                // 자체가 오지 않으므로 release 원격/API 통신에는 영향이 없다.
+                // → onReceivedError 의 번들 폴백으로 이어진다.
+                // ★플랫폼 차이(B-6, 2026-08-17 TestFlight 130·131 실증): 안드로이드는 SSL "오류"
+                //   때만 이 콜백이 오지만, iOS(WKWebView)는 유효한 인증서라도 모든 https 연결마다
+                //   서버 신뢰 챌린지가 온다. 종전 "release 무조건 CANCEL" 은 iOS release 에서
+                //   웹뷰 발 전체 API(https)를 TLS 단계에서 전멸시켰다(서버 접근로그 요청 0건).
+                //   → 오류 없는 정상 신뢰(sslError 부재)는 PROCEED 로 통과시킨다.
                 onReceivedServerTrustAuthRequest: (controller, challenge) async {
-                  debugPrint('onReceivedServerTrustAuthRequest: ${challenge.protectionSpace.host}');
-                  // L-4: 자가서명 PROCEED 는 debug 빌드에만 한정한다. !kReleaseMode 는 profile
+                  final sslError = challenge.protectionSpace.sslError;
+                  debugPrint(
+                      'onReceivedServerTrustAuthRequest: ${challenge.protectionSpace.host} sslError=${sslError?.code}');
+                  // 정상 인증서(오류 없음) → 통과. iOS 의 상시 챌린지가 API 를 죽이지 않게 한다.
+                  if (sslError == null || sslError.code == null) {
+                    return ServerTrustAuthResponse(
+                      action: ServerTrustAuthResponseAction.PROCEED,
+                    );
+                  }
+                  // L-4: 자가서명(무효 인증서) PROCEED 는 debug 빌드에만 한정한다. !kReleaseMode 는 profile
                   //   에서도 true 라 profile 산출물 유출 시 무효 인증서가 통과되므로 kDebugMode 로 좁힌다.
                   if (kDebugMode) {
                     return ServerTrustAuthResponse(
