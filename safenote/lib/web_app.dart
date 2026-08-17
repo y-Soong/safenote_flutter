@@ -1431,10 +1431,16 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                 //   → 오류 없는 정상 신뢰(sslError 부재)는 PROCEED 로 통과시킨다.
                 onReceivedServerTrustAuthRequest: (controller, challenge) async {
                   final sslError = challenge.protectionSpace.sslError;
+                  final sslErrorCode = sslError?.code;
                   debugPrint(
-                      'onReceivedServerTrustAuthRequest: ${challenge.protectionSpace.host} sslError=${sslError?.code}');
-                  // 정상 인증서(오류 없음) → 통과. iOS 의 상시 챌린지가 API 를 죽이지 않게 한다.
-                  if (sslError == null || sslError.code == null) {
+                      'onReceivedServerTrustAuthRequest: ${challenge.protectionSpace.host} sslError=$sslErrorCode');
+                  // 정상 인증서 → 통과. iOS 의 상시 챌린지가 API 를 죽이지 않게 한다.
+                  // ★iOS 함정 2(TestFlight 132 실증): 유효한 인증서도 SecTrustEvaluate 가
+                  //   proceed 가 아닌 unspecified(평가 성공·암묵 신뢰)를 돌려줘, 플러그인이
+                  //   sslError(code=UNSPECIFIED)를 실어 보낸다. UNSPECIFIED 는 안드로이드
+                  //   매핑에 존재하지 않는 iOS 전용 "정상" 값이므로 신뢰로 취급한다.
+                  if (sslErrorCode == null ||
+                      sslErrorCode == SslErrorType.UNSPECIFIED) {
                     return ServerTrustAuthResponse(
                       action: ServerTrustAuthResponseAction.PROCEED,
                     );
