@@ -133,6 +133,12 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
   Map<String, dynamic>? _pendingPushData;
   bool _pageLoaded = false;
 
+  /// 푸시 payload 를 Vue 로 전달할 때의 재시도 횟수·간격.
+  ///   about:blank 선행 로드 → 실제 앱 페이지 전환 + Vue mount 까지를 덮을 만큼만 짧게 잡는다
+  ///   (10 × 300ms = 3s). 초과하면 보류로 되돌려 다음 onLoadStop 이 재시도한다.
+  static const int _kPushDeliverRetries = 10;
+  static const Duration _kPushDeliverInterval = Duration(milliseconds: 300);
+
   // 작업지시서 iOS-푸시-미수신-및-포그라운드-알림-미표시 문제 B:
   // FirebaseMessaging.onMessage(포그라운드 수신) 구독. 표시 처리는 push_notifications.dart 위임.
   StreamSubscription<RemoteMessage>? _foregroundMsgSub;
@@ -804,23 +810,51 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
       _pendingPushData = data;
       return;
     }
+    // ignore: discarded_futures
     _evalPushOpened(data);
   }
 
-  /// data(Map)를 JSON 문자열로 직렬화하여 window.__onPushOpened 호출.
-  void _evalPushOpened(Map<String, dynamic> data) {
+  /// data(Map)를 window.__onPushOpened 로 전달하고 <b>실제 전달 여부를 확인</b>한다.
+  ///
+  /// <p>★iOS 유실 결함 수정(2026-08-19 TestFlight 실측): 종전 구현은 전달 성공을 확인하지 않고
+  ///    fire-and-forget 으로 evaluateJavascript 만 호출했다. 그런데 원격 판정(매니페스트 조회) 중
+  ///    <b>about:blank 선행 로드의 onLoadStop</b> 이 먼저 발화해 보류 payload 를 flush 하는데,
+  ///    about:blank 에는 Vue 가 없어 {@code window.__onPushOpened && ...} 가드가 조용히 no-op 된다.
+  ///    그 사이 {@code _pendingPushData} 는 이미 소비돼 <b>알림 payload 가 영구 유실</b>됐다
+  ///    (증상: iOS 만 항상 메인화면. 안드로이드는 getInitialMessage 해소 시점이 달라 미재현).
+  ///
+  /// <p>이제 JS 가 핸들러 존재 여부를 boolean 으로 돌려주고, 미등록이면 짧게 재시도한다.
+  ///    재시도 중 실제 앱 페이지로 전환되면 그 시점에 성공한다. 끝내 실패하면 보류로 되돌려
+  ///    다음 onLoadStop 에서 다시 시도한다(유실 없음).
+  Future<bool> _evalPushOpened(Map<String, dynamic> data) async {
     final ctl = _ctl;
-    if (ctl == null) return;
-    try {
-      final json = jsonEncode(data);
-      // ignore: discarded_futures
-      ctl.evaluateJavascript(
-        source:
-            "window.__onPushOpened && window.__onPushOpened(${jsStringLiteral(json)})",
-      );
-    } catch (e) {
-      debugPrint('[PUSH_OPENED] dispatch 실패: $e');
+    if (ctl == null) {
+      _pendingPushData = data;
+      return false;
     }
+    final json = jsonEncode(data);
+    // 핸들러가 있으면 호출하고 true, 없으면 false 를 반환한다(전달 확인용).
+    final source =
+        "(function(){ if (typeof window.__onPushOpened === 'function') {"
+        " window.__onPushOpened(${jsStringLiteral(json)}); return true; } return false; })()";
+
+    for (var attempt = 1; attempt <= _kPushDeliverRetries; attempt++) {
+      try {
+        final result = await ctl.evaluateJavascript(source: source);
+        if (result == true || result == 1 || result == 'true') {
+          debugPrint('[PUSH_OPENED] Vue 전달 성공(시도 $attempt)');
+          return true;
+        }
+      } catch (e) {
+        // 페이지 전환 중이면 일시적으로 실패할 수 있다 — 재시도로 흡수.
+        debugPrint('[PUSH_OPENED] evaluateJavascript 실패(시도 $attempt): $e');
+      }
+      await Future.delayed(_kPushDeliverInterval);
+    }
+
+    debugPrint('[PUSH_OPENED] Vue 핸들러 미등록 — 보류로 되돌리고 다음 로드에서 재시도');
+    _pendingPushData = data;
+    return false;
   }
 
   InAppWebViewSettings _settings() => InAppWebViewSettings(
@@ -1310,7 +1344,9 @@ class _WebAppState extends State<WebApp> with WidgetsBindingObserver {
                   _pageLoaded = true;
                   final pending = _pendingPushData;
                   if (pending != null) {
+                    // 전달 확인은 _evalPushOpened 가 한다(실패 시 스스로 보류로 되돌림).
                     _pendingPushData = null;
+                    // ignore: discarded_futures
                     _evalPushOpened(pending);
                   }
 
