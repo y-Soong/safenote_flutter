@@ -23,7 +23,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 #   codemagic.yaml 은 --build-number 만 주입하고 --build-name 은 주입하지 않으므로
 #   버전명의 단독 출처는 이 줄이다. 심사 승인된 버전을 다시 내보낼 때는 여기를 올릴 것.
 #   1.0.0 = 2026-08-07 iOS 심사 승인 / 1.0.1 = 반차 시간대 도입 (2026-08-08)
-version: 1.0.1+4
+version: 1.0.2+5
 
 environment:
   sdk: ^3.9.2
